@@ -1,1 +1,59 @@
-In Progress
+#include "/vmm/bin/common.defs"
+#define VQFX10_DISK basedisk "/vmm/data/user_disks/ksrijith/contrail/jinstall-vqfx-10-f-21.4R3-S6.5.img"
+
+
+config "lab-a" {
+    display "NULL";
+
+    vm "sw1" {
+        hostname "sw1";
+        VQFX10_DISK;   
+        memory 5120;
+        ncpus 4;
+        interface "em0" { bridge "external"; };      
+        interface "em1" { bridge "sw1-sw2-l1"; };    
+        interface "em2" { bridge "sw1-sw2-l2"; };   
+        interface "em3" { bridge "sw1-h1"; };        
+        interface "em4" { bridge "sw1-spare"; };     
+    };
+
+    vm "sw2" {
+        hostname "sw2";
+        VQFX10_DISK;
+        memory 5120;
+        ncpus 4;
+        interface "em0" { bridge "external"; };
+        interface "em1" { bridge "sw1-sw2-l1"; }; 
+        interface "em2" { bridge "sw1-sw2-l2"; };
+        interface "em3" { bridge "sw2-h2"; }; 
+        interface "em4" { bridge "sw2-spare"; };
+    };
+
+
+    vm "h1" {
+        hostname "h1";
+        VQFX10_DISK;
+        memory 1024;
+        ncpus 1;
+        interface "em0" { bridge "external"; };
+        interface "em1" { bridge "sw1-h1"; };
+    };
+
+    vm "h2" {
+        hostname "h2";
+        VQFX10_DISK;
+        memory 1024;
+        ncpus 1;
+        interface "em0" { bridge "external"; };
+        interface "em1" { bridge "sw2-h2"; };
+    };
+
+
+    bridge "sw1-sw2-l1" {};
+    bridge "sw1-sw2-l2" {};
+    bridge "sw1-h1" {};
+    bridge "sw2-h2" {};
+    bridge "sw1-spare" {};
+    bridge "sw2-spare" {};
+    PRIVATE_BRIDGES
+};
