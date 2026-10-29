@@ -1,59 +1,108 @@
 #include "/vmm/bin/common.defs"
-#define VQFX10_DISK basedisk "/vmm/data/user_disks/ksrijith/contrail/jinstall-vqfx-10-f-21.4R3-S6.5.img"
-
+#include "/vmm/data/user_disks/vmxc/common.vmx.p3.defs"
+#define COSIM_DISK basedisk "/vmm/data/user_disks/ksrijith/contrail/apstra/vqfx-20.2R1.10-pfe-qemu.vmdk";
+#define VQFX10_DISK basedisk "/vmm/data/user_disks/ksrijith/contrail/jinstall-vqfx-10-f-21.4R3-S6.5.img";
+#define VQFX_SYSTEST_CONFIG_A install "/vmm/data/user_disks/ksrijith/contrail/apstra.conf" "/root/junos.base.conf";
 
 config "lab-a" {
-    display "NULL";
 
-    vm "sw1" {
-        hostname "sw1";
-        VQFX10_DISK;   
-        memory 5120;
-        ncpus 4;
-        interface "em0" { bridge "external"; };      
-        interface "em1" { bridge "sw1-sw2-l1"; };    
-        interface "em2" { bridge "sw1-sw2-l2"; };   
-        interface "em3" { bridge "sw1-h1"; };        
-        interface "em4" { bridge "sw1-spare"; };     
-    };
+  vm "sw1" {
+    hostname "sw1";
+    VQFX10_DISK
+    setvar "boot_noveriexec" "YES";
+    setvar "qemu_args" "-smbios type=1,product=QFX10K-11";
+    VQFX_SYSTEST_CONFIG_A
+    interface "em0" { bridge "external"; };
+    interface "em1" { bridge "pecosim_1"; ipaddr "169.254.0.2"; };
+    interface "em2" { bridge "reserved_bridge"; };
+    interface "em3" { bridge "sw1-sw2-l1"; };   /* xe-0/0/0  link 1 */
+    interface "em4" { bridge "sw1-sw2-l2"; };   /* xe-0/0/1  link 2 */
+    interface "em5" { bridge "sw1-h1"; };       /* xe-0/0/2  to H1  */
+    interface "em6" { bridge "sw1-spare"; };    /* xe-0/0/3  spare  */
+  };
+  vm "sw1_cosim" {
+    hostname "sw1_cosim";
+    COSIM_DISK
+    memory 4096;
+    ncpus 4;
+    interface "em0" { bridge "external"; };
+    interface "em1" { bridge "pecosim_1"; ipaddr "169.254.0.1"; };
+  };
 
-    vm "sw2" {
-        hostname "sw2";
-        VQFX10_DISK;
-        memory 5120;
-        ncpus 4;
-        interface "em0" { bridge "external"; };
-        interface "em1" { bridge "sw1-sw2-l1"; }; 
-        interface "em2" { bridge "sw1-sw2-l2"; };
-        interface "em3" { bridge "sw2-h2"; }; 
-        interface "em4" { bridge "sw2-spare"; };
-    };
+  vm "sw2" {
+    hostname "sw2";
+    VQFX10_DISK
+    setvar "boot_noveriexec" "YES";
+    setvar "qemu_args" "-smbios type=1,product=QFX10K-11";
+    VQFX_SYSTEST_CONFIG_A
+    interface "em0" { bridge "external"; };
+    interface "em1" { bridge "pecosim_2"; ipaddr "169.254.0.2"; };
+    interface "em2" { bridge "reserved_bridge"; };
+    interface "em3" { bridge "sw1-sw2-l1"; };   /* xe-0/0/0 */
+    interface "em4" { bridge "sw1-sw2-l2"; };   /* xe-0/0/1 */
+    interface "em5" { bridge "sw2-h2"; };       /* xe-0/0/2 */
+    interface "em6" { bridge "sw2-spare"; };    /* xe-0/0/3 */
+  };
+  vm "sw2_cosim" {
+    hostname "sw2_cosim";
+    COSIM_DISK
+    memory 4096;
+    ncpus 4;
+    interface "em0" { bridge "external"; };
+    interface "em1" { bridge "pecosim_2"; ipaddr "169.254.0.1"; };
+  };
 
+  vm "h1" {
+    hostname "h1";
+    VQFX10_DISK
+    setvar "boot_noveriexec" "YES";
+    setvar "qemu_args" "-smbios type=1,product=QFX10K-11";
+    VQFX_SYSTEST_CONFIG_A
+    interface "em0" { bridge "external"; };
+    interface "em1" { bridge "pecosim_3"; ipaddr "169.254.0.2"; };
+    interface "em2" { bridge "reserved_bridge"; };
+    interface "em3" { bridge "sw1-h1"; };       /* xe-0/0/0 to SW1 */
+  };
+  vm "h1_cosim" {
+    hostname "h1_cosim";
+    COSIM_DISK
+    memory 4096;
+    ncpus 4;
+    interface "em0" { bridge "external"; };
+    interface "em1" { bridge "pecosim_3"; ipaddr "169.254.0.1"; };
+  };
 
-    vm "h1" {
-        hostname "h1";
-        VQFX10_DISK;
-        memory 1024;
-        ncpus 1;
-        interface "em0" { bridge "external"; };
-        interface "em1" { bridge "sw1-h1"; };
-    };
+  vm "h2" {
+    hostname "h2";
+    VQFX10_DISK
+    setvar "boot_noveriexec" "YES";
+    setvar "qemu_args" "-smbios type=1,product=QFX10K-11";
+    VQFX_SYSTEST_CONFIG_A
+    interface "em0" { bridge "external"; };
+    interface "em1" { bridge "pecosim_4"; ipaddr "169.254.0.2"; };
+    interface "em2" { bridge "reserved_bridge"; };
+    interface "em3" { bridge "sw2-h2"; };       /* xe-0/0/0 to SW2 */
+  };
+  vm "h2_cosim" {
+    hostname "h2_cosim";
+    COSIM_DISK
+    memory 4096;
+    ncpus 4;
+    interface "em0" { bridge "external"; };
+    interface "em1" { bridge "pecosim_4"; ipaddr "169.254.0.1"; };
+  };
 
-    vm "h2" {
-        hostname "h2";
-        VQFX10_DISK;
-        memory 1024;
-        ncpus 1;
-        interface "em0" { bridge "external"; };
-        interface "em1" { bridge "sw2-h2"; };
-    };
+  bridge "reserved_bridge" {};
+  bridge "pecosim_1" {};
+  bridge "pecosim_2" {};
+  bridge "pecosim_3" {};
+  bridge "pecosim_4" {};
+  bridge "sw1-sw2-l1" {};
+  bridge "sw1-sw2-l2" {};
+  bridge "sw1-h1" {};
+  bridge "sw2-h2" {};
+  bridge "sw1-spare" {};
+  bridge "sw2-spare" {};
 
-
-    bridge "sw1-sw2-l1" {};
-    bridge "sw1-sw2-l2" {};
-    bridge "sw1-h1" {};
-    bridge "sw2-h2" {};
-    bridge "sw1-spare" {};
-    bridge "sw2-spare" {};
-    PRIVATE_BRIDGES
+  PRIVATE_BRIDGES
 };
