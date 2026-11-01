@@ -1,0 +1,151 @@
+Well done; Day 1 is complete. Day 2 is **CLI navigation**: about 45 minutes reading and an hour hands-on, all on SW1.
+
+---
+
+# Day 2: Junos CLI navigation
+
+## 1. The two modes
+
+| | Operational mode | Configuration mode |
+| --- | --- | --- |
+| Prompt | `user@sw1>` | `user@sw1#` |
+| Purpose | Look at the device and act on it: `show`, `ping`, `traceroute`, `monitor`, `request`, `clear`, `file` | Change the configuration: `set`, `delete`, `edit`, `commit` |
+| Enter / leave | `configure` to enter | `exit` or `quit` at the top level to leave; `exit configuration-mode` from anywhere |
+
+If you log in as `root`, you land in the Linux/FreeBSD shell (`%` prompt). Type `cli` to get to operational mode.
+
+**The main operational verbs:**
+
+| Verb | Example | Use |
+| --- | --- | --- |
+| `show` | `show interfaces terse` | View state |
+| `monitor` | `monitor interface xe-0/0/0` | Live, refreshing views (Ctrl-C to stop) |
+| `request` | `request system reboot` | Act on the system |
+| `clear` | `clear interfaces statistics all` | Reset counters or sessions |
+| `ping` / `traceroute` | `ping 10.0.0.2 count 5` | Test reachability |
+| `file` | `file list /var/log` | Work with files |
+| `set cli` | `set cli screen-length 0` | Change your session settings only (not the config) |
+
+## 2. Getting help as you type
+
+- **`?`** lists every possible next word with a short description. Use it constantly.
+- **Tab or Space** completes a command word. Space doesn't complete names you defined, such as interface names; Tab does.
+- **`help topic <x>`** and **`help reference <x>`** give built-in documentation, for example `help reference interfaces unit`.
+- Junos accepts **unambiguous abbreviations**: `sh int te` works for `show interfaces terse`.
+
+**Useful keys** (Emacs-style):
+
+| Keys | Action |
+| --- | --- |
+| Ctrl-A / Ctrl-E | Start / end of line |
+| Ctrl-W | Delete the previous word |
+| Ctrl-U | Delete the whole line |
+| Up arrow or Ctrl-P | Previous command |
+| Esc then `.` | Insert the last word of the previous command |
+
+## 3. The configuration hierarchy
+
+Junos config is a **tree**. `system`, `interfaces`, `protocols` and `routing-options` are top-level branches, each with branches inside. You can work two ways:
+
+**a) Full `set` commands from the top:**
+```
+set interfaces xe-0/0/3 description "spare port"
+```
+
+**b) Move into a branch with `edit`, then use short commands:**
+```
+edit interfaces xe-0/0/3
+set description "spare port"
+```
+
+The banner above the prompt, such as `[edit interfaces xe-0/0/3]`, always shows where you are.
+
+| Command | Moves you |
+| --- | --- |
+| `edit <path>` | Down into a branch (creates it if it doesn't exist) |
+| `up` / `up 2` | One / two levels up |
+| `top` | Back to the top of the hierarchy |
+| `exit` | Back to the previous location (not always "up") |
+| `top <command>` | Runs one command from the top without moving, e.g. `top show system` |
+| `run <operational command>` | Runs an operational command without leaving config mode, e.g. `run show interfaces terse` |
+
+**`show` in configuration mode** displays only the config **at your current level**. At the top, `show` prints the whole candidate config in curly-brace format.
+
+## 4. Pipes: filtering output
+
+Add `|` after almost any `show` command. Several can be chained.
+
+| Pipe | Example | Does |
+| --- | --- | --- |
+| `match` | `show interfaces terse \| match xe-` | Show only matching lines (supports regex: `match "xe-\|em0"`) |
+| `except` | `show interfaces terse \| except down` | Hide matching lines |
+| `find` | `show configuration \| find protocols` | Start output at the first match |
+| `count` | `show route \| count` | Count lines |
+| `no-more` | `show configuration \| no-more` | No paging (good for copying) |
+| `last` | `show log messages \| last 20` | Last lines only |
+| `display set` | `show configuration \| display set` | Show the config as `set` commands, the easiest to copy and back up |
+| `display inheritance` | `show configuration \| display inheritance` | Show what config groups add (week 2 topic) |
+| `display xml` | `show interfaces terse \| display xml` | The XML behind the output; you'll use it for automation later |
+| `compare` | `show \| compare` | Candidate vs active diff (Wednesday's topic) |
+| `save` | `show configuration \| save /var/tmp/sw1.txt` | Save output to a file |
+
+## 5. Two config-mode habits from day one
+
+- **`configure private`** gives you your own copy of the candidate config, so someone else's uncommitted changes don't mix with yours. **`configure exclusive`** locks the config so only you can change it. Plain `configure` shares one candidate with everyone. On shared lab or production boxes, use `private`.
+- **`status`** in config mode shows who else is editing.
+
+---
+
+## Hands-on (on SW1, about 1 hour)
+
+Work through these in order. Check off each item when it works without notes.
+
+1. **Help:** type `show ?`, then `show system ?`. Then use Tab to complete `show interfaces xe-0/0/0 terse`.
+2. **Abbreviations:** run `sh int te`, `sh ch fpc` and `sh ver`.
+3. **Pipes:**
+   - `show interfaces terse | match xe-`
+   - `show interfaces terse | except down`
+   - `show configuration | display set | match system`
+   - `show route | count`
+4. **Live monitoring:** `monitor interface xe-0/0/0`, then Ctrl-C to quit. Next, `monitor traffic interface em0 count 10` captures 10 management packets.
+5. **Navigate the hierarchy:**
+   ```
+   configure private
+   edit system
+   show
+   up
+   edit interfaces xe-0/0/3
+   set description "spare port"
+   top
+   show interfaces xe-0/0/3
+   run show interfaces terse xe-0/0/3
+   ```
+6. **Read the candidate vs active difference:** while still in config mode, run `show | compare`. Your description change shows with a `+`.
+7. **Leave without committing:** `rollback 0`, then `exit configuration-mode`. Confirm the description isn't there: `show configuration interfaces xe-0/0/3`.
+8. **Save output to a file and read it back:**
+   ```
+   show configuration | display set | save /var/tmp/day2.txt
+   file show /var/tmp/day2.txt
+   ```
+
+---
+
+## Self-check
+
+1. You're at `[edit protocols ospf area 0]` and want to see interface status without leaving config mode. What do you type?
+2. What's the difference between `up` and `exit` in config mode?
+3. How do you show only the lines of the config containing "ssh", as `set` commands?
+4. Two engineers are configuring the same switch. Which way of entering config mode prevents their changes from mixing?
+5. You typed `set interfaces xe-0/0/3 description test` but haven't committed. Is it in `show configuration` from operational mode?
+
+<details><summary>Answers</summary>
+
+1. `run show interfaces terse`
+2. `up` always moves one level up the tree. `exit` returns to where you were before the last move, and exits config mode at the top.
+3. `show configuration | display set | match ssh`
+4. `configure private`, which gives each of them a separate candidate (or `configure exclusive` to lock others out).
+5. No. Operational-mode `show configuration` shows the **active** config, and your change is only in the candidate until you commit.
+
+</details>
+
+Add a short `notes/week1-cli.md` to your repo with your top 10 commands and pipes. **Next is Day 3: the commit model** (`commit check`, `commit confirmed`, rollback and the rescue config you already saved), which is one of the most heavily tested JNCIA topics.
