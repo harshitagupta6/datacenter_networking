@@ -1,0 +1,38 @@
+Ask one question: **does this device need to route traffic for whatever is plugged into the port, or does it just need to pass frames along inside a VLAN?**
+
+- **Route it → `family inet`.** The port gets its own IP address and is its own subnet, a point-to-point Layer 3 hop.
+- **Just pass frames within a VLAN → `family ethernet-switching`.** The port has no IP. It's a member of one or more VLANs, and the device switches frames by MAC address.
+
+## Practical checks
+
+1. **What's on the other end?**
+   - Another router, or a spine/leaf in a routed fabric → `inet`
+   - A server, host, hypervisor, firewall in Layer 2 mode, or a legacy switch that must share a VLAN with other ports → `ethernet-switching`
+
+2. **Does this link need to be its own subnet?**
+   If both ends only talk to each other and exchange routes (OSPF, BGP), it's a routed link: `inet`, usually a /31. If the attached device must sit in the same subnet as hosts on *other* ports, the ports have to share a VLAN: `ethernet-switching`.
+
+3. **Where is the default gateway for the hosts?**
+   Hosts on switched ports still need a gateway. On Junos you don't put an IP on the switch port for that. You create an **IRB interface** (`irb.100`) bound to the VLAN. That gives you Layer 2 on the access ports and Layer 3 on the VLAN, cleanly separated.
+
+4. **Does the traffic need to cross a VLAN boundary at this port?**
+   Only a router can move traffic between subnets. If crossing happens right here, on a link to another router, use `inet`. If it happens elsewhere (at an IRB or on an upstream router), the port stays `ethernet-switching`.
+
+## How it plays out in a data center (JNCIA-DC view)
+
+In a typical spine-leaf IP fabric:
+
+| Link | Family | Why |
+|---|---|---|
+| Leaf ↔ spine | `inet` (/31) | Pure routed underlay; BGP/OSPF runs here, no VLANs stretch across it |
+| Leaf ↔ server | `ethernet-switching` | Servers live in VLANs; several servers share a subnet |
+| `irb.X` on the leaf | `inet` | The servers' gateway for that VLAN |
+| `lo0.0` | `inet` | Router ID, BGP peering, VTEP source |
+
+Rule of thumb: **the fabric is routed; the edge is switched; IRB connects them.**
+
+## A small refinement to your rule
+
+You're right that a single unit can't be both `inet` and `ethernet-switching`. But a unit can carry **several Layer 3 families together**: `inet`, `inet6`, `mpls` and `iso` often sit on the same routed unit, as in a core link running IPv4, IPv6 and MPLS at once. The real line is Layer 2 switching vs. Layer 3 routing, not "one family per unit."
+
+On platforms that support `flexible-vlan-tagging`, one physical port can carry a routed unit and a switched unit, using different VLAN IDs. The physical port isn't locked to one role. Only each unit is.
