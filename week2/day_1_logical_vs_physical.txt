@@ -1,0 +1,63 @@
+On a Junos device, every interface has two layers. The **physical interface** is the actual port and everything about the wire. The **logical interface**, called a **unit**, is where you configure what the traffic means: which protocol it carries, what IP it uses, which VLAN it belongs to. Junos always keeps these two separate, and that's the key idea.
+
+## The physical interface: the port
+
+This is the hardware port itself, named like `ge-0/0/0` (type-FPC/PIC/port). Settings at this level apply to the whole wire, no matter what traffic runs over it:
+
+- Link speed and duplex
+- MTU (the largest frame the port will send)
+- Encapsulation and VLAN tagging mode (`vlan-tagging`, `flexible-vlan-tagging`)
+- Enabling or disabling the port, and link-level options like auto-negotiation and flow control
+
+At this layer, Junos only knows "is the cable up, and how are frames put on it?" It knows nothing about IP addresses.
+
+## The logical interface: the unit
+
+Under each physical interface you create one or more units: `ge-0/0/0.0`, `ge-0/0/0.100`, and so on. This is where the Layer 3 and Layer 2 identity lives:
+
+- **Protocol family:** `family inet` (IPv4), `inet6` (IPv6), `ethernet-switching` (Layer 2), `mpls`, `iso`
+- **Addresses:** the IP address goes on the unit, never on the physical port
+- **VLAN ID** when the port carries tagged traffic
+- Firewall filters, routing-instance membership, and similar settings
+
+```
+interfaces {
+    ge-0/0/0 {                     ← physical: the wire
+        vlan-tagging;
+        mtu 9192;
+        unit 100 {                 ← logical: VLAN 100 subnet
+            vlan-id 100;
+            family inet address 10.1.100.1/24;
+        }
+        unit 200 {                 ← logical: VLAN 200 subnet
+            vlan-id 200;
+            family inet address 10.1.200.1/24;
+        }
+    }
+}
+```
+
+So one cable carries two separate networks, each with its own IP and its own policies.
+
+## Why Junos splits them
+
+1. **One port can carry many logical networks.** In real networks, a single 10G or 100G link often carries many VLANs or customers. Each unit acts as an independent interface for routing, filters and policy, while they all share one piece of hardware. This is how you build a router-on-a-stick, a trunk to a server, or a link carrying several tenants.
+
+2. **Clean separation of concerns.** If the link flaps, that's a physical problem. If the routing is wrong, that's a logical problem. You can troubleshoot each layer on its own. `show interfaces ge-0/0/0` displays both: the physical status at the top, and each logical interface (unit) below it.
+
+3. **It's mandatory and consistent.** Junos won't pass traffic on an interface with no unit. Even a plain untagged routed port needs `unit 0`, which is why you see `ge-0/0/0.0` everywhere. Because the model never changes, the same configuration structure works on Ethernet, SONET, tunnels (`gr-`, `st0`), aggregated Ethernet (`ae0`), IRB (`irb.100`) and loopback (`lo0.0`).
+
+4. **Policy attaches to the right place.** Firewall filters, CoS (class of service) classifiers and routing instances bind to a unit and a family. You can filter VLAN 100 without touching VLAN 200, even though they share a port.
+
+## Why this matters for JNCIA-DC
+
+Data center designs depend on this model:
+
+- **`ae` interfaces:** several physical links are bundled into one, and the units sit on the bundle.
+- **`irb.X` interfaces:** these are logical-only interfaces with no physical port behind them. Each one acts as the Layer 3 gateway for a VLAN.
+- **`lo0.0`:** the loopback, used for router IDs and as the VTEP (VXLAN tunnel endpoint) source in EVPN-VXLAN.
+- **Server-facing ports:** you choose between `family ethernet-switching` (the port does Layer 2 switching) and `family inet` (the port routes).
+
+A simple way to remember it: **the physical interface is the road, and units are the lanes painted on it.** Speed and the road surface are physical properties. Where each lane goes and who can drive in it are logical properties.
+
+To see this for yourself, configure two VLAN units on one port in a VMM lab and compare `show interfaces terse` with `show interfaces ge-0/0/0 extensive`.
