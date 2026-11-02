@@ -1,0 +1,185 @@
+Great progress. You're a day ahead of the plan, since the official start is tomorrow (Nov 2). Day 3 is the **commit model**, one of the most heavily tested JNCIA topics, so give it the full time: 45 minutes reading and 1–1.5 hours hands-on.
+
+---
+
+# Day 3: The Junos commit model
+
+## 1. Candidate vs active
+
+Junos never changes the running device as you type. There are always two copies of the configuration:
+
+| | Candidate config | Active config |
+| --- | --- | --- |
+| What it is | Your working copy | What the device is actually running |
+| Changes when | You type `set`, `delete`, `load` and so on | Only when you `commit` successfully |
+| Seen with | `show` in config mode | `show configuration` in operational mode |
+
+On `commit`, `mgd` checks the whole candidate (syntax, required fields, references that don't exist). Only if everything is valid does it activate the config and tell the daemons (`rpd`, `dcd` and others) what changed. If anything fails, **nothing** is applied; you never get a half-applied config.
+
+```
+set / delete / load → candidate → commit (validate) → active → daemons apply changes
+```
+
+## 2. Commit variants
+
+| Command | What it does | When to use it |
+| --- | --- | --- |
+| `commit` | Validate and activate | Normal use |
+| `commit check` | Validate only, don't activate | Before a risky change, or to find errors |
+| `commit confirmed 5` | Activate, but **roll back automatically after 5 minutes** unless you commit again | Any change that could cut off your access (management, filters, routing). The default is 10 minutes. |
+| `commit` (again, after `commit confirmed`) | Confirms the change and cancels the automatic rollback | Once you've verified you still have access |
+| `commit comment "text"` | Saves a note with the commit | Always, for an audit trail |
+| `commit and-quit` | Commit, then leave config mode | Saves a step |
+| `commit at "23:00"` | Schedule the commit for later | Maintenance windows (`clear system commit` cancels it) |
+| `commit synchronize` | Commit on both Routing Engines | Dual-RE chassis; not in your lab |
+
+**Watch out:** with `commit confirmed`, the **second** commit is what makes the change permanent. If you forget it, the device quietly rolls back, which is the point if you've locked yourself out.
+
+## 3. Rollback
+
+Each successful commit saves the previous config. Junos keeps **50**: `rollback 0` is the current active config, `rollback 1` the one before it, up to `rollback 49`.
+
+| Command | Mode | Does |
+| --- | --- | --- |
+| `show system commit` | Operational | History: number, time, user, method, comment |
+| `show system rollback 3` | Operational | Shows rollback 3's full config |
+| `show system rollback compare 3 0` | Operational | Diff between two rollbacks |
+| `rollback 0` | Config | Throws away all uncommitted changes in the candidate |
+| `rollback 1` | Config | Loads the previous config **into the candidate**; you must still `commit` |
+| `show \| compare rollback 1` | Config | What the candidate changes compared with rollback 1 |
+
+**The exam trap:** `rollback n` only loads into the candidate. Nothing changes on the device until you commit.
+
+## 4. The rescue configuration
+
+The rescue config is a known-good config saved by you, separate from the 50 rollbacks, so it never "falls off the end" of the history. You saved one on Thursday.
+
+| Command | Does |
+| --- | --- |
+| `request system configuration rescue save` | Saves the current active config as the rescue config |
+| `rollback rescue` (config mode), then `commit` | Loads the rescue config |
+| `request system configuration rescue delete` | Deletes it |
+
+On physical devices, if no rescue config exists, the chassis raises a minor alarm, so save one after every major milestone.
+
+## 5. Loading configuration in bulk
+
+`load` brings in config from a file or from your terminal (paste, then Ctrl-D):
+
+| Option | Effect |
+| --- | --- |
+| `load merge terminal` | Adds the pasted config to the candidate; conflicting values are replaced |
+| `load override terminal` | Replaces the **entire** candidate with what you paste (dangerous) |
+| `load replace terminal` | Replaces only sections marked with a `replace:` tag |
+| `load set terminal` | Accepts a list of `set` commands, the easiest way to restore from your Git backups |
+| `load merge /var/tmp/file.conf` | Same, from a file on the device |
+| `load factory-default` | Loads the default config (you'll need to set a root password before committing) |
+
+`load` changes only the candidate. You still commit.
+
+## 6. Editing tools in config mode
+
+| Command | Example | Effect |
+| --- | --- | --- |
+| `delete` | `delete interfaces xe-0/0/3 description` | Removes it from the config |
+| `deactivate` / `activate` | `deactivate interfaces xe-0/0/3` | Keeps the config but marks it `inactive:`, so it's ignored. Good for temporary changes. |
+| `annotate` | `annotate interfaces xe-0/0/3 "reserved for H3"` | Adds a `/* comment */` above the statement |
+| `rename` | `rename interfaces xe-0/0/3 to xe-0/0/2` | Renames a statement |
+| `copy` | `copy interfaces xe-0/0/1 to xe-0/0/3` | Duplicates config |
+| `insert` | Used to reorder firewall terms and policy terms | Order matters there (week 6 onward) |
+
+---
+
+## Hands-on (on SW1, about 1–1.5 hours)
+
+**Lab 1: Commit history and comments**
+```
+configure private
+set interfaces xe-0/0/3 description "spare port"
+show | compare
+commit check
+commit comment "day3: spare port description"
+exit
+show system commit
+```
+
+**Lab 2: `commit confirmed` saves you.** Simulate a mistake that would break access. Do this from the VMM console, not SSH.
+```
+configure
+deactivate system services ssh
+commit confirmed 3 comment "test: break ssh"
+```
+- Try to SSH to SW1 from your jump host; it should fail.
+- Don't commit again. Wait 3 minutes and watch the console for the rollback message.
+- Confirm SSH works again, then run `show system commit` and find the automatic rollback entry.
+
+**Lab 3: `commit confirmed` with confirmation**
+```
+configure
+set system ntp server 10.10.10.10
+commit confirmed 5
+show configuration system ntp
+commit comment "confirm ntp"
+```
+Wait 5 minutes and check that the NTP server is still configured.
+
+**Lab 4: Rollback**
+```
+configure
+show | compare rollback 2
+rollback 2
+show | compare
+commit comment "restored to rollback 2"
+run show system commit
+```
+Then undo it with `rollback 1` and a commit.
+
+**Lab 5: Rescue**
+```
+configure
+delete system ntp
+delete interfaces xe-0/0/3
+commit comment "messy change"
+rollback rescue
+show | compare
+commit comment "back to rescue"
+```
+
+**Lab 6: Restore from your Git backup**
+```
+configure
+load set terminal
+```
+Paste a few lines from your `baseline/sw1.set`, then press Ctrl-D. Then run `show | compare`, and either commit or `rollback 0`.
+
+**Lab 7: Deactivate and annotate**
+```
+configure
+deactivate system ntp
+show system ntp
+annotate system "SW1 - Lab A"
+commit comment "day3 annotate"
+```
+In `show`, the NTP block shows `inactive:`, and the comment appears above `system`.
+
+---
+
+## Self-check
+
+1. You run `rollback 1` and log out without committing. Has anything changed on the device?
+2. You use `commit confirmed 10` and then lose your SSH session. What happens, and when?
+3. Which is safer for restoring a full backup in `set` format: `load override terminal` or `load set terminal`? Why?
+4. How do you see what changed in the commit before the last one?
+5. Why save the rescue config rather than rely on rollback 49?
+
+<details><summary>Answers</summary>
+
+1. No. `rollback` only loads into the candidate; the change is discarded when you leave (a shared candidate keeps it pending until someone commits or discards it).
+2. After 10 minutes with no confirming commit, Junos automatically restores the previous config and commits it.
+3. `load set terminal` is safer: it adds and changes only what you paste. `load override` replaces the entire candidate with what you paste, which deletes anything not in it.
+4. `show system rollback compare 2 1`, or in config mode `show | compare rollback 1` compared with rollback 2.
+5. Rollbacks roll over after 50 commits. The rescue config stays until you replace it, so it's a reliable known-good fallback.
+
+</details>
+
+After the labs, take a fresh rescue save with `request system configuration rescue save` so it includes today's changes, and push your configs to Git. **Day 4 is system configuration** (users, login classes, NTP, syslog, DNS, SSH), building toward Saturday's rebuild-from-memory challenge.
