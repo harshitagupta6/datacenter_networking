@@ -1,0 +1,210 @@
+Day 4 is **system configuration**: everything a switch needs before it carries a single packet. These are also the exact items you'll rebuild from memory in Saturday's challenge.
+
+One check first: Day 3's labs (`commit confirmed`, rollback, rescue) matter a lot for the exam. If you haven't run them yet, do those before today's labs. You can read this part either way.
+
+---
+
+# Day 4: Junos system configuration
+
+Everything today lives under the `[edit system]` hierarchy, except management routing, which lives under `routing-options`.
+
+## 1. Identity
+
+```
+set system host-name sw1
+set system domain-name lab.local
+set system time-zone Asia/Kolkata
+set system login message "Authorised access only - Lab A"
+```
+
+The login message appears before the password prompt; `announcement` shows after login instead.
+
+## 2. Root password and the rule you can't skip
+
+Junos **refuses to commit any configuration that has no root password.** You'll hit this after `load factory-default`.
+
+```
+set system root-authentication plain-text-password      <- prompts for it twice
+set system root-authentication encrypted-password "$6$..."  <- paste an existing hash
+set system root-authentication ssh-rsa "ssh-rsa AAAA..."     <- key-based login
+```
+
+Junos stores the password as a hash, so `show` never displays it in plain text.
+
+## 3. Users and login classes
+
+A **login class** defines what a user can do; each user is assigned exactly one class.
+
+**Predefined classes:**
+
+| Class | Can do |
+| --- | --- |
+| `super-user` | Everything (full admin) |
+| `operator` | View, plus clear, network tools, reset and trace; no config changes |
+| `read-only` | View only |
+| `unauthorized` | Nothing |
+
+**Creating users:**
+```
+set system login user admin uid 2001 class super-user authentication plain-text-password
+set system login user noc class read-only authentication plain-text-password
+```
+
+**Custom classes** use permission flags plus allow or deny lists, which are regular expressions:
+```
+set system login class netops permissions [ view configure interface interface-control ]
+set system login class netops deny-commands "request system (reboot|halt|power-off)"
+set system login class netops idle-timeout 15
+set system login user ops1 class netops authentication plain-text-password
+```
+
+Permission flags worth knowing: `view`, `view-configuration`, `configure`, `interface`, `interface-control`, `routing`, `routing-control`, `security`, `system`, `clear`, `network`, `maintenance`, `all`.
+
+**Authentication order:** with central servers, Junos checks RADIUS or TACACS+ first, then the local password database:
+```
+set system authentication-order [ tacplus password ]
+```
+For JNCIA, know the concept: if the servers are unreachable, Junos falls back to local accounts.
+
+## 4. Management services
+
+```
+set system services ssh
+set system services ssh root-login deny
+set system services netconf ssh
+```
+
+- `root-login` can be `allow`, `deny` or `deny-password` (key-based root login only). Production standard is `deny`: log in as a named user, never as root.
+- Telnet and plain-HTTP J-Web are insecure; leave them off.
+- `netconf ssh` enables the API you'll use for automation in Phase 4.
+
+## 5. Management interface and management routing
+
+The management port (`em0` on vQFX, `fxp0` or `re0:mgmt-0` on other platforms) is **out-of-band**. It doesn't forward transit traffic.
+
+```
+set interfaces em0 unit 0 family inet address 10.x.x.x/24
+set routing-options static route <jump-host-subnet> next-hop <mgmt-gateway>
+```
+
+**The problem:** that static route sits in `inet.0` alongside your lab routes. Once you add OSPF or BGP, management and data routes mix. Two fixes:
+- **Narrow static routes** (as above) only for the subnets you manage from. Use `no-readvertise` so they're never exported into routing protocols.
+- **The management VRF:** `set system management-instance` moves the management port into a separate routing table, `mgmt_junos`. Services then need to be told to use it, so learn the concept now and try it in a later week.
+
+## 6. NTP
+
+Accurate time matters for logs, certificates and troubleshooting across devices.
+
+```
+set system ntp server 10.10.10.10
+set system ntp boot-server 10.10.10.10
+```
+
+Check with `show ntp associations` and `show ntp status`. In your lab there may be no reachable NTP server; the config still teaches the syntax.
+
+## 7. Syslog
+
+Format: `syslog <destination> <facility> <severity>`
+
+```
+set system syslog file messages any notice
+set system syslog file messages authorization info
+set system syslog file interactive-commands interactive-commands any
+set system syslog host 10.10.10.20 any warning
+```
+
+**Severities**, from most to least severe: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `any`. Choosing a level includes everything more severe.
+
+**Common facilities:** `any`, `authorization`, `daemon`, `kernel`, `interactive-commands`, `change-log`.
+
+View logs with `show log messages | last 20`, `show log interactive-commands`, and `monitor start messages` (live; `monitor stop` to end).
+
+## 8. DNS and config archiving
+
+```
+set system name-server 8.8.8.8
+set system archival configuration transfer-on-commit
+set system archival configuration archive-sites "scp://user@10.10.10.30/backups" password "..."
+```
+
+Archival copies the config to a server on every commit, the production version of what your Git repo does by hand. Learn the concept; you don't need a server to set it up today.
+
+---
+
+## Hands-on (about 1–1.5 hours)
+
+Do this on **SW2**, from the VMM console, so a mistake doesn't affect SW1 and you can't lock yourself out over SSH.
+
+**Lab 1: Users and classes**
+```
+configure private
+set system login user admin uid 2001 class super-user authentication plain-text-password
+set system login user noc uid 2002 class read-only authentication plain-text-password
+set system login class netops permissions [ view configure interface interface-control ]
+set system login class netops deny-commands "request system (reboot|halt)"
+set system login user ops1 uid 2003 class netops authentication plain-text-password
+commit comment "day4 users"
+```
+Test each user over SSH:
+- `noc` can run `show interfaces terse` but `configure` fails.
+- `ops1` can configure interfaces, but `request system reboot` is denied.
+- `admin` can do everything.
+
+**Lab 2: Lock down root safely.** Use what you learned yesterday.
+```
+configure
+set system services ssh root-login deny
+commit confirmed 5 comment "deny root ssh"
+```
+SSH in as `admin`. If it works, run `commit` to confirm; if not, let it roll back. Root SSH should now fail; console root login still works.
+
+**Lab 3: Identity, NTP and banner**
+```
+set system domain-name lab.local
+set system time-zone Asia/Kolkata
+set system login message "Authorised access only - Lab A"
+set system ntp server 10.10.10.10
+commit comment "day4 identity ntp"
+```
+Log out and back in to see the banner. Run `show system uptime` to check the time zone.
+
+**Lab 4: Syslog**
+```
+set system syslog file interactive-commands interactive-commands any
+set system syslog file config-changes change-log info
+commit comment "day4 syslog"
+run show log interactive-commands | last 10
+run show log config-changes | last 10
+```
+You'll see your own commands and commits, now logged.
+
+**Lab 5: Management route hygiene.** Look at how your management route is configured:
+```
+show configuration routing-options
+run show route protocol static
+```
+If it's a default route (`0.0.0.0/0`), replace it with a specific route to your jump-host subnet plus `no-readvertise`. Do it with `commit confirmed`.
+
+**Finish:** copy SW2's system settings to SW1 (`load set terminal` makes this quick), save a fresh rescue config on both switches, and push to Git.
+
+---
+
+## Self-check
+
+1. You run `load factory-default`, set the hostname and commit. The commit fails. Why?
+2. What's the difference between the `operator` and `read-only` classes?
+3. `syslog file messages any warning`: are `error` messages logged? Are `notice` messages?
+4. Why use `root-login deny` and named accounts in production?
+5. Why can a default route on the management interface cause problems once OSPF or BGP is running?
+
+<details><summary>Answers</summary>
+
+1. There's no root password; Junos requires `root-authentication` before any commit.
+2. `read-only` can only view. `operator` can also clear counters and sessions, use network tools, and run some maintenance actions, but still can't change the configuration.
+3. `error` is logged, because it's more severe than `warning`. `notice` isn't, because it's less severe.
+4. Accountability (logs show who did what), least privilege through classes, and no shared password for the most powerful account.
+5. It lives in `inet.0` with your lab routes. It can pull data-plane traffic toward the management network, or get redistributed into routing protocols. Narrow routes with `no-readvertise`, or the management VRF, keep the two apart.
+
+</details>
+
+That completes the content for week 1. Next is Friday's buffer with practice questions, then **Saturday's lab challenge**: wipe SW2 from the console, rebuild everything from Days 3–4 from memory in 60 minutes, and recover a bad commit three different ways.
