@@ -1,0 +1,146 @@
+Here's the same question explained with your lab.
+
+## The setup
+
+Your switch has two kinds of networks:
+
+- **The management network.** `em0` connects to VMM's out-of-band network, which is how you SSH in.
+- **The data network.** The `xe-` ports carry real traffic between SW1, SW2, H1 and H2.
+
+Both share **one routing table**, `inet.0`, unless you separate them.
+
+Say your management access was set up with a default route:
+
+```
+set routing-options static route 0.0.0.0/0 next-hop 10.x.x.1   <- the management gateway
+```
+
+That means: *"For any destination I don't have a more specific route to, send the packet out the management port."* On Day 1, with no routing protocols running, that's harmless. It causes three problems once OSPF or BGP starts.
+
+## Problem 1: Lab traffic disappears into the management port
+
+Later, SW1 needs to reach a prefix that OSPF hasn't learned yet, because a neighbour is down or you've made a config mistake. Without the default route, SW1 would say "no route to host", which is a clear error you can troubleshoot. With it, SW1 matches `0.0.0.0/0` and sends the packet out `em0` to the management gateway. The management network knows nothing about your lab subnets, so the packet is silently dropped.
+
+You'd see ping timeouts instead of an error, and you'd look for an OSPF problem when the real cause is a static route you forgot about.
+
+## Problem 2: The wrong default route wins
+
+In Phase 2–3, your fabric will often learn a real default route from a border device, for example `0.0.0.0/0` through BGP. Now SW1 has two default routes:
+
+| Route | Source | Preference |
+| --- | --- | --- |
+| 0.0.0.0/0 to the management gateway | Static | **5** |
+| 0.0.0.0/0 to the border leaf | BGP | 170 |
+
+Lower preference wins (the table from Day 1), so the **static management route becomes active**. The real fabric default is ignored, and all default-routed traffic heads to the management port and gets dropped.
+
+## Problem 3: The route leaks to your neighbours
+
+A very common config is *"advertise my static routes into OSPF or BGP"*, with an export policy matching `protocol static`. That policy also picks up the management default route. SW1 then advertises "send me your default traffic" to SW2 and everyone else. They all forward unknown traffic to SW1, which pushes it out `em0` into the management network: one bad route breaks the whole lab.
+
+## The two fixes
+
+**Fix 1: a narrow route plus `no-readvertise`.** Route only the subnet you actually manage from, and mark it so it can never be exported:
+
+```
+delete routing-options static route 0.0.0.0/0
+set routing-options static route 10.20.30.0/24 next-hop 10.x.x.1 no-readvertise
+```
+
+Replace `10.20.30.0/24` with your jump host's subnet.
+- Problem 1 is solved: unknown lab destinations get "no route" instead of disappearing.
+- Problem 2 is solved: there's no competing static default.
+- Problem 3 is solved: `no-readvertise` stops any export policy from advertising it.
+
+**Fix 2: a separate management table.**
+
+```
+set system management-instance
+```
+
+This moves `em0` into its own routing table, `mgmt_junos`. Management routes live there and lab routes stay in `inet.0`, so the two can never interfere. It's the cleaner production approach, but services like NTP and syslog must then be pointed at that instance, so it's slightly more work.
+
+## Check your lab now
+
+```
+show route 0.0.0.0/0
+show route protocol static
+```
+
+
+====================================================================================================================================================
+How do I find this out placeholder values for sw1 , sw2 , h1 and h2
+set routing-options static route <jump-subnet> next-hop <mgmt-gateway> no-readvertise
+  
+Run the same three commands on each device. All four sit on the same VMM management network, so you'll most likely get the same answers everywhere. Find them once on SW1, then confirm on the others.
+
+## Step 1: Find `<mgmt-gateway>`
+
+```
+show route 0.0.0.0/0
+```
+
+Example output:
+```
+inet.0: 12 destinations, 12 routes (12 active, 0 holddown, 0 hidden)
++ = Active Route, - = Last Active, * = Both
+
+0.0.0.0/0          *[Static/5] 1d 02:14:07
+                    >  to 10.49.127.254 via em0.0
+```
+
+The address after **`to`**, on the line ending in **`via em0.0`**, is your gateway. Here it's `10.49.127.254`.
+
+If this command shows nothing, there's no management default route on that device, so there's nothing to fix. Skip to the check at the end.
+
+## Step 2: Find `<jump-subnet>`
+
+While logged in over SSH:
+```
+show system users
+```
+
+Example output:
+```
+USER     TTY      FROM              LOGIN@  IDLE WHAT
+admin    pts/0    10.49.32.15       9:01AM      - cli
+```
+
+The **`FROM`** column is the IP of the machine you're connecting from, your jump host. Here it's `10.49.32.15`.
+
+Turn that into the route. The simplest and safest choice is a host route for just that one machine:
+```
+10.49.32.15/32
+```
+
+If you'd rather cover the whole subnet, log in to the jump host itself and run `ip -4 addr`. It shows something like `10.49.32.15/22`, which means the subnet is `10.49.32.0/22`.
+
+If you also connect from another machine (laptop, VPN), repeat this from that machine and add a second route.
+
+## Step 3: Check the gateway makes sense
+
+```
+show interfaces terse em0
+```
+Example: `em0.0  up  up  inet  10.49.100.21/17`
+
+The gateway from step 1 should be inside this subnet (10.49.127.254 is within 10.49.0.0/17 ✓).
+
+There's also a useful special case: if your jump host's IP is in the **same subnet as `em0`**, it's directly connected. Then you don't need a static route at all; just delete the default route.
+
+## Fill in this table
+
+| Device | `em0` IP | Gateway (step 1) | Jump host (step 2) | Route to configure |
+| --- | --- | --- | --- | --- |
+| SW1 | | | | |
+| SW2 | | | | |
+| H1 | | | | |
+| H2 | | | | |
+
+With the example values, the command would be:
+```
+set routing-options static route 10.49.32.15/32 next-hop 10.49.127.254 no-readvertise
+```
+
+Apply it with `commit confirmed 5` and test SSH from a new window before confirming, as in the previous message. Add the finished table to your repo's README; you'll need these values every time you rebuild the lab.
+If you see a static `0.0.0.0/0` via `em0`, apply Fix 1 with `commit confirmed 5`. Confirm you can still SSH in, then commit again. That's Lab 5 from Day 4, and it's worth doing before week 7, when OSPF arrives.
