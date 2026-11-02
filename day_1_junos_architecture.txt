@@ -1,0 +1,144 @@
+Here's your Day 1 reading, written for your lab. It takes about 45 minutes with the commands. The official version is Juniper's short [Junos OS Architecture Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-architecture.html) page; this covers that and what JNCIA-DC expects around it.
+
+---
+
+# Junos architecture: Day 1 study notes
+
+## 1. The big idea: two planes, two jobs
+
+Every Juniper device is split into two parts that do different work:
+
+| | Control plane | Forwarding plane (data plane) |
+| --- | --- | --- |
+| Runs on | Routing Engine (RE) | Packet Forwarding Engine (PFE) |
+| Job | Thinks: learns routes, runs protocols, handles the CLI and management | Moves packets as fast as possible |
+| Speed | General-purpose CPU, slow per packet | ASICs (hardware chips), line rate |
+| In your lab | The `sw1` VM | The `sw1_cosim` VM |
+
+Because this architecture separates control operations such as routing updates and system management from packet forwarding, the router can deliver superior performance and highly reliable operation. Three practical consequences matter:
+- A busy CPU (for example, a big BGP update) doesn't slow down traffic forwarding.
+- Packet forwarding keeps running even when control-plane software restarts.
+- The two planes talk over an **internal link**. In your vQFX lab that's literally the `em1` bridge between `sw1` and `sw1_cosim` with the 169.254.0.x addresses.
+
+## 2. The Routing Engine
+
+The Routing Engine controls the routing updates and the system management. It consists of routing protocol software processes running inside a protected memory environment on a general-purpose computer platform.
+
+Junos runs as a set of separate programs called **daemons** (processes), each in its own protected memory. If one crashes, the others keep running. These are the ones to know:
+
+| Daemon | What it does |
+| --- | --- |
+| `rpd` | Routing protocol daemon: OSPF, BGP, static routes; builds the routing tables |
+| `mgd` | Management daemon: the CLI, the configuration database, commits, NETCONF |
+| `chassisd` | Chassis daemon: hardware inventory, fans, power, FPCs, alarms |
+| `dcd` | Device control daemon: configures interfaces |
+| `snmpd` | SNMP |
+| `eventd` | Event logging and syslog |
+
+The RE's operating system kernel sits underneath these daemons and talks to the PFE. Classic Junos is built on FreeBSD; **Junos OS Evolved** (used on PTX and newer QFX) runs on Linux with the same CLI.
+
+**Try it:**
+```
+show chassis routing-engine
+show system processes extensive | match "rpd|mgd|chassisd|dcd"
+```
+
+## 3. The Packet Forwarding Engine
+
+The PFE uses **ASICs** to do the heavy lifting: Layer 2 switching, Layer 3 route lookups, filtering, class of service, and forwarding packets from an input port to an output port. On physical gear the PFE sits on line cards called **FPCs** (Flexible PIC Concentrators). On fixed switches like the QFX5120, the "FPC" is built into the box. On vQFX the PFE is the cosim VM, which is why `show chassis fpc` only shows FPC 0 as Online once the cosim has booted.
+
+**Try it:**
+```
+show chassis fpc
+show chassis hardware
+```
+
+## 4. Routing table vs forwarding table
+
+This is the most-tested concept in this topic.
+
+- The **routing table** (RIB) lives on the RE. It holds *every* route learned from all sources, such as OSPF, BGP, static and direct, including backup routes. The main IPv4 table is `inet.0`.
+- For each destination, the RE picks one **active route** (best preference, then protocol-specific tie-breakers).
+- From the routing tables, the Routing Engine derives a table of active routes, called the forwarding table, which is then copied into the Packet Forwarding Engine. The forwarding table in the Packet Forwarding Engine can be updated without interrupting the router's forwarding.
+
+```
+Protocols (OSPF, BGP, static) → routing table (RE) → best routes → forwarding table (PFE) → packets
+```
+
+In output, `show route` marks the active route with `*`. `show route forwarding-table` shows only what was pushed to the PFE, with next hops resolved to interfaces.
+
+**Default route preferences** (lower wins). You'll use these until the exam:
+
+| Source | Preference |
+| --- | --- |
+| Direct (connected) | 0 |
+| Local (the interface's own address) | 0 |
+| Static | 5 |
+| OSPF internal | 10 |
+| OSPF external | 150 |
+| BGP (internal and external) | 170 |
+
+## 5. Transit vs exception traffic
+
+The PFE classifies every packet as one of two types:
+
+**Transit traffic** passes *through* the device. It enters one port, gets looked up in the forwarding table and exits another port, handled entirely by the PFE at line rate. Example: H1 pinging H2 through SW1.
+
+**Exception traffic** needs the RE. The PFE sends it up the internal link to the RE. It includes:
+- Packets *addressed to* the device itself: ping to SW1, SSH, SNMP, NTP replies.
+- Routing protocol packets: OSPF hellos, BGP sessions.
+- Packets the PFE can't handle alone, such as an expired TTL (which generates ICMP "time exceeded"; this is how traceroute works) or IP options.
+
+Exception traffic is **rate-limited** on its way to the RE, so a flood of it can't overwhelm the CPU. Protecting the RE further with a firewall filter on `lo0` comes up later in your plan.
+
+## 6. What happens when things fail
+
+| Failure | Effect |
+| --- | --- |
+| `rpd` restarts | The PFE keeps forwarding with the last forwarding table it had. Protocols re-converge when `rpd` returns. Graceful restart (week 9) makes neighbours hold routes during this. |
+| `mgd` problem | CLI or commits are affected; forwarding is not |
+| RE reboots | On a single-RE box, protocols drop. With dual REs, Graceful RE Switchover (GRES) and Nonstop Routing (NSR) take over. |
+| PFE / FPC fails | Ports on that FPC stop forwarding; `chassisd` raises an alarm |
+
+## 7. Interface naming
+
+Format: `type-fpc/pic/port.unit`. For example, `xe-0/0/2.0` means 10G port, FPC 0, PIC 0, port 2, logical unit 0.
+
+| Prefix | Meaning | In your lab |
+| --- | --- | --- |
+| `ge-` / `xe-` / `et-` | 1G / 10G / 40G-and-above Ethernet | `xe-0/0/0` to `xe-0/0/3` on vQFX |
+| `em0` / `fxp0` / `re0:mgmt-0` | Out-of-band management port (name varies by platform) | `em0` on vQFX |
+| `em1` (vQFX), internal links | RE-to-PFE internal link | The cosim bridge |
+| `lo0` | Loopback: the device's stable "identity" address | You'll add 10.0.0.1/32 later |
+| `irb` | Routed interface for a VLAN (Layer 3 gateway) | Week 5 |
+| `ae` | Aggregated Ethernet (LAG) | Week 9 |
+
+The **unit** is a logical interface. Addresses and protocol families (`family inet`, `family ethernet-switching`) are configured on units, not on the physical port.
+
+## 8. Junos software in brief
+
+- **One OS family:** the same Junos CLI on EX, QFX, MX, SRX, PTX and ACX, which is why skills transfer across platforms.
+- **Release naming:** take your vQFX's `21.4R3-S6.5`. 21 = year, 4 = quarter release, R3 = the third maintenance release, S6 = the sixth service release on top, .5 = the build.
+- **Configuration is a database, not a running file.** You edit a *candidate* copy, and it only becomes the *active* config when you commit. `mgd` checks it first and keeps rollbacks. That's the Wednesday (Nov 4) topic.
+
+---
+
+## Self-check (answer without looking back)
+
+1. Which daemon would you suspect if OSPF neighbours keep dropping but the CLI works fine?
+2. H1 pings H2 through SW1. Transit or exception for SW1? Now H1 pings SW1's IRB address. Which is it?
+3. A route appears in `show route` but not in `show route forwarding-table`. Give one reason.
+4. An OSPF internal route and a static route exist for the same prefix. Which becomes active, and why?
+5. In your lab, what happens to forwarding if you could stop `rpd` on SW1 for 30 seconds?
+
+<details><summary>Answers</summary>
+
+1. `rpd`, which runs the routing protocols.
+2. Transit (PFE only), then exception (addressed to the device, so sent to the RE).
+3. It isn't the active route. Another route for the same prefix has a better preference, or its next hop can't be resolved.
+4. The static route: preference 5 beats OSPF internal at 10.
+5. The PFE keeps forwarding with its existing forwarding table. Neighbours may drop the OSPF/BGP sessions until `rpd` returns, unless graceful restart is configured.
+
+</details>
+
+Once you've read this and run the commands, write the one-page note from yesterday's list in your own words. That's Day 1 complete.
