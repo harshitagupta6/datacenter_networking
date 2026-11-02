@@ -144,3 +144,23 @@ set routing-options static route 10.49.32.15/32 next-hop 10.49.127.254 no-readve
 
 Apply it with `commit confirmed 5` and test SSH from a new window before confirming, as in the previous message. Add the finished table to your repo's README; you'll need these values every time you rebuild the lab.
 If you see a static `0.0.0.0/0` via `em0`, apply Fix 1 with `commit confirmed 5`. Confirm you can still SSH in, then commit again. That's Lab 5 from Day 4, and it's worth doing before week 7, when OSPF arrives.
+
+============================================================================
+
+set routing-options static route 10.49.32.15/32 next-hop 10.49.127.254 no-readvertise
+
+To reach my jump host 10.49.32.15, and only that host, send packets to the management gateway 10.49.127.254. Never tell any other router about this route.
+
+It’s a route on the switch, pointing back toward the jump host. It isn’t a route from the jump host. Its job is to let the switch reply to you.
+
+
+What happens during an SSH session ?
+
+Every SSH session is two-way traffic:
+
+Jump host → SW1: your keystrokes arrive on em0. Delivery works fine: your jump host has its own routes, and the management network carries the packets to SW1.
+SW1 → jump host: SW1 must send back the prompt and command output. To do that, SW1 has to look up 10.49.32.15 in its own routing table to decide where to send the reply.
+
+Before, the default route said “reach everything through the management gateway.” Now the static route says “reach only my jump host through the management gateway.”
+
+Fix 1 should be configured or Fix 2 , never both.
