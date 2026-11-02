@@ -1,0 +1,150 @@
+Week 2 runs Nov 9–15 in the plan. You're a week ahead, so you can keep this pace or slow down. Keep Saturday's week 1 challenge on your list; it fits on any weekend.
+
+## Week 2 overview: interfaces and configuration efficiency
+
+| Day | Topic | Lab outcome |
+| --- | --- | --- |
+| **1** | Interface fundamentals: physical vs logical, units, families, loopback | SW1↔SW2 links and loopbacks addressed and pinging |
+| 2 | Interface monitoring and troubleshooting: `detail`/`extensive`, errors, MTU, disable | Find and fix three planted faults |
+| 3 | `interface-range`, `groups`, `apply-groups`, wildcards | Common settings applied once to many ports |
+| 4 | `apply-path`, `rename`/`copy`/`insert`, config hygiene | Prefix list built automatically from your config |
+| 5 | Buffer + quiz | — |
+| Sat | Challenge | Rebuild SW2's interfaces and groups from memory |
+
+---
+
+# Day 1: Interface fundamentals
+
+## 1. Physical vs logical interfaces
+
+Every Junos interface has two layers:
+
+| Layer | Example | Holds |
+| --- | --- | --- |
+| **Physical interface** (IFD) | `xe-0/0/0` | Port-level settings: description, MTU, speed, `disable`, LACP membership |
+| **Logical interface / unit** (IFL) | `xe-0/0/0.0` | Protocol settings: `family`, IP addresses, VLAN membership |
+
+You can't put an IP address on `xe-0/0/0` directly; it always goes on a unit. Most single-purpose ports use **unit 0**. Multiple units on one port need VLAN tagging, which comes in week 4.
+
+```
+set interfaces xe-0/0/0 description "to sw2 link1"
+set interfaces xe-0/0/0 mtu 9216
+set interfaces xe-0/0/0 unit 0 family inet address 10.1.1.0/31
+```
+
+## 2. Protocol families
+
+The `family` on a unit decides what the unit does:
+
+| Family | Purpose | When you'll use it |
+| --- | --- | --- |
+| `inet` | IPv4 routing | From today |
+| `inet6` | IPv6 routing | Later |
+| `ethernet-switching` | Layer 2 switch port: access or trunk | Week 4 |
+| `mpls` | MPLS labels | Not in DC basics |
+
+**Rule:** a unit is **either** Layer 3 (`inet`) **or** Layer 2 (`ethernet-switching`), never both. A routed link and a switch port are different things. Routed gateways for VLANs use `irb` interfaces, in week 5.
+
+## 3. Interface types you'll meet
+
+| Interface | Purpose |
+| --- | --- |
+| `xe-` / `ge-` / `et-` | Physical Ethernet ports |
+| `lo0` | **Loopback:** a virtual interface that's always up. Used as the device's identity for router IDs, BGP peering and management, and later as the VTEP source address in VXLAN. Usually a `/32`. |
+| `irb` | Routed gateway for a VLAN |
+| `ae` | Link aggregation bundle |
+| `em0` | Management port (in `mgmt_junos` in your lab) |
+
+## 4. Why /31 on point-to-point links
+
+A link between two routers only ever has two devices. A `/31` gives exactly two addresses, with no network or broadcast address wasted, and it's standard in data center fabrics, where hundreds of links would otherwise burn address space. Junos supports `/31` natively.
+
+## 5. Interface status: "admin" vs "link"
+
+`show interfaces terse` shows two status columns:
+
+| Admin | Link | Meaning |
+| --- | --- | --- |
+| up | up | Working |
+| up | down | Enabled, but no signal: cable, far end down or mismatch |
+| down | down | Administratively disabled with `disable` |
+
+---
+
+## Hands-on: address the Lab A links
+
+You'll use the IP plan from your topology:
+
+| | SW1 | SW2 |
+| --- | --- | --- |
+| `lo0.0` | 10.0.0.1/32 | 10.0.0.2/32 |
+| Link 1 `xe-0/0/0` | 10.1.1.0/31 | 10.1.1.1/31 |
+| Link 2 `xe-0/0/1` | 10.1.1.2/31 | 10.1.1.3/31 |
+
+**Step 1: Check what the base config already put on these ports**
+```
+show configuration interfaces | display set | match "xe-0/0/0|xe-0/0/1|lo0"
+```
+If a port already has `unit 0 family ethernet-switching`, delete that unit first, because you can't add `inet` beside it:
+```
+configure private
+delete interfaces xe-0/0/0 unit 0
+delete interfaces xe-0/0/1 unit 0
+```
+
+**Step 2: Configure SW1**
+```
+set interfaces xe-0/0/0 description "to sw2 xe-0/0/0 (link1)"
+set interfaces xe-0/0/0 unit 0 family inet address 10.1.1.0/31
+set interfaces xe-0/0/1 description "to sw2 xe-0/0/1 (link2)"
+set interfaces xe-0/0/1 unit 0 family inet address 10.1.1.2/31
+set interfaces lo0 unit 0 family inet address 10.0.0.1/32
+show | compare
+commit comment "week2 day1: p2p links + lo0"
+```
+
+**Step 3: Configure SW2** with the mirror-image addresses (`.1`, `.3`, `10.0.0.2`), then commit.
+
+**Step 4: Verify on SW1**
+```
+show interfaces terse | match "xe-0/0/[01]|lo0"
+show route protocol direct
+show route protocol local
+ping 10.1.1.1 count 3
+ping 10.1.1.3 count 3
+```
+
+**Step 5: Spot the routing gap**
+```
+ping 10.0.0.2 count 3
+```
+This **fails**. SW1 knows only its directly connected subnets, and SW2's loopback is on neither link. `show route 10.0.0.2` shows no route. That's the problem routing solves in weeks 6–8. For now, fix it with a static route on each switch:
+```
+set routing-options static route 10.0.0.2/32 next-hop 10.1.1.1    <- on SW1
+set routing-options static route 10.0.0.1/32 next-hop 10.1.1.0    <- on SW2
+```
+Commit, then `ping 10.0.0.2 source 10.0.0.1` should succeed.
+
+**Step 6: Save.** Push both configs to Git.
+
+---
+
+## Self-check
+
+1. Why can't you put an IP address directly on `xe-0/0/0`?
+2. Can unit 0 have both `family inet` and `family ethernet-switching`?
+3. In `show route`, what's the difference between a **Direct** and a **Local** route for 10.1.1.0/31?
+4. Why is `lo0` preferred over a physical interface address as a router's identity?
+5. SW1 can ping 10.1.1.1 but not 10.0.0.2. Why?
+
+<details><summary>Answers</summary>
+
+1. IP addresses and protocol families belong on logical units. The physical interface holds only port-level settings.
+2. No. A unit is either Layer 3 (`inet`) or Layer 2 (`ethernet-switching`).
+3. **Direct** is the connected subnet (10.1.1.0/31). **Local** is the router's own address on it (10.1.1.0/32).
+4. A loopback is always up, so its address stays reachable as long as *any* path to the device exists. A physical interface address disappears if that one link fails.
+5. 10.1.1.1 is on a directly connected subnet. 10.0.0.2 isn't, and without a static route or routing protocol SW1 has no route to it.
+
+</details>
+
+Tell me when Day 1 is done, and Day 2 (monitoring and troubleshooting interfaces) will build on these working links.
