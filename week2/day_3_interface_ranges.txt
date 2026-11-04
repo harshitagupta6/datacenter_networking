@@ -1,0 +1,165 @@
+Day 3 is about **writing a setting once and applying it to many places**. On real data center switches with 48+ ports, this is how engineers keep configs short and consistent.
+
+---
+
+# Day 3: `interface-range`, `groups` and `apply-groups`
+
+## 1. The problem
+
+On Day 2 you set `mtu 9216` port by port. On a 48-port leaf with 6 uplinks, that's dozens of repeated lines, and one missed port means an MTU mismatch. Junos gives you two tools to avoid this:
+
+| Tool | Scope | Best for |
+| --- | --- | --- |
+| `interface-range` | Interfaces only | Physical port settings for a list of ports |
+| `groups` + `apply-groups` | **Any** part of the config | Reusable templates: common system settings, settings for all ports of one type |
+
+## 2. `interface-range`
+
+You create a named range, list its members, then configure the range as if it were one interface:
+
+```
+set interfaces interface-range FABRIC member xe-0/0/0
+set interfaces interface-range FABRIC member xe-0/0/1
+set interfaces interface-range FABRIC mtu 9216
+set interfaces interface-range FABRIC description "fabric link"
+```
+
+- `member-range xe-0/0/0 to xe-0/0/1` adds a block of ports in one line.
+- Settings apply to every member, and `show interfaces xe-0/0/0` displays them as if configured directly.
+- A port can be in a range **and** have its own config, such as its unit and IP address, which stays per port.
+
+## 3. Configuration groups
+
+A **group** is a block of configuration stored under `[edit groups]` that **does nothing until applied**:
+
+```
+set groups COMMON system ntp server 10.10.10.10 routing-instance mgmt_junos
+set groups COMMON system login message "Authorised access only - Lab A"
+set apply-groups COMMON
+```
+
+`apply-groups COMMON` at the top level means "inherit everything in COMMON into the config". The result behaves exactly as if you'd typed those lines directly. The same group pasted onto 100 switches gives 100 identical baselines.
+
+**Wildcards** in groups match many statements at once. They're written in angle brackets:
+```
+set groups JUMBO interfaces <xe-*> mtu 9216
+set apply-groups JUMBO
+```
+This sets MTU 9216 on every `xe-` interface that **exists in your configuration**. Wildcards don't create new interfaces; they only add to ones already configured.
+
+## 4. Seeing inherited config
+
+Inherited lines **don't appear** in a normal `show`, which confuses everyone at first:
+
+| Command | Shows |
+| --- | --- |
+| `show configuration interfaces xe-0/0/0` | Only what's configured directly |
+| `show configuration interfaces xe-0/0/0 \| display inheritance` | The full result, with `##` comments showing which group each line came from |
+| `show configuration interfaces \| display inheritance no-comments` | The full result without the comments |
+| `show configuration groups` | The group definitions themselves |
+
+## 5. Precedence: who wins
+
+| Rule | Example |
+| --- | --- |
+| **Direct config always beats inherited config** | `mtu 1600` on `xe-0/0/1` overrides the JUMBO group's 9216 |
+| **Among groups, the first listed wins** | With `apply-groups [ A B ]`, A's value beats B's |
+| **`apply-groups` at a lower level beats a higher one** | Applied under `interfaces xe-0/0/1`, it beats the top level |
+| **`apply-groups-except` opts out** | `set interfaces xe-0/0/3 apply-groups-except JUMBO` |
+
+## 6. Groups you'll see in the wild
+
+- `junos-defaults`: Junos's built-in defaults. View it with `show configuration groups junos-defaults`.
+- `re0` / `re1`: per-Routing-Engine settings, such as hostname and management IP, on dual-RE chassis.
+- Apstra and other automation tools often push config inside groups. Your base config may already contain some; check with `show configuration groups`.
+
+---
+
+## Hands-on (SW1 first, then SW2)
+
+**Lab 1: See what groups already exist**
+```
+show configuration | display set | match "^set groups|apply-groups"
+```
+Note anything from the base config, and leave it alone.
+
+**Lab 2: Replace per-port MTU with an `interface-range`**
+```
+configure private
+delete interfaces xe-0/0/0 mtu
+delete interfaces xe-0/0/1 mtu
+set interfaces interface-range FABRIC member-range xe-0/0/0 to xe-0/0/1
+set interfaces interface-range FABRIC mtu 9216
+show | compare
+commit comment "w2d3: fabric range"
+run show interfaces xe-0/0/0 | match MTU
+run show interfaces xe-0/0/1 | match MTU
+```
+MTU should still be 9216 on both, with half the lines.
+
+**Lab 3: Move MTU into a wildcard group instead**
+```
+delete interfaces interface-range FABRIC mtu
+set groups JUMBO interfaces <xe-*> mtu 9216
+set apply-groups JUMBO
+commit comment "w2d3: jumbo group"
+show interfaces xe-0/0/0 | display inheritance
+```
+You'll see `mtu 9216;` with a `## 'xe-*' was inherited from group 'JUMBO'` comment. Confirm with `run show interfaces xe-0/0/0 | match MTU`.
+
+**Lab 4: Test precedence**
+```
+set interfaces xe-0/0/1 mtu 1600
+commit
+run show interfaces xe-0/0/1 | match MTU
+```
+It's 1600: direct config beats the group. Now remove it and use the opt-out instead:
+```
+delete interfaces xe-0/0/1 mtu
+set interfaces xe-0/0/1 apply-groups-except JUMBO
+commit
+run show interfaces xe-0/0/1 | match MTU
+```
+It's back to the default 1514, because xe-0/0/1 is excluded from the group. **Undo** with `delete interfaces xe-0/0/1 apply-groups-except`, commit, and confirm 9216 again.
+
+**Lab 5: A common system baseline for both switches**
+```
+set groups COMMON system domain-name lab.local
+set groups COMMON system time-zone Asia/Kolkata
+set groups COMMON system login message "Authorised access only - Lab A"
+set groups COMMON system ntp server 10.10.10.10 routing-instance mgmt_junos
+set groups COMMON system syslog file interactive-commands interactive-commands any
+set apply-groups COMMON
+commit comment "w2d3: common group"
+```
+Then delete the same statements from the main `system` hierarchy (where you set them on Day 4) and commit again. Check with `show configuration system | display inheritance`: everything is still there, now inherited from COMMON.
+
+**Lab 6: Reuse on SW2.** On SW1:
+```
+show configuration groups | display set
+```
+Copy the output, paste it on SW2 with `load set terminal`, add `set apply-groups [ JUMBO COMMON ]`, and commit. You've just templated a second switch in seconds, which is the core idea behind Apstra in Phase 2.
+
+Finish by saving the rescue config on both and pushing to Git.
+
+---
+
+## Self-check
+
+1. You configure a group but nothing changes on the device. What did you forget?
+2. Group JUMBO sets MTU 9216 on `<xe-*>`, and `xe-0/0/1` also has `mtu 1600` configured directly. What's the MTU?
+3. Does `set groups JUMBO interfaces <xe-*> mtu 9216` create config for `xe-0/0/5` if it isn't configured anywhere?
+4. `show configuration interfaces xe-0/0/0` doesn't show the MTU, but the interface uses 9216. How do you find where it comes from?
+5. With `apply-groups [ A B ]`, both groups set a different NTP server. Which applies?
+
+<details><summary>Answers</summary>
+
+1. `apply-groups <name>`. A group does nothing until it's applied.
+2. 1600. Direct configuration always beats inherited configuration.
+3. No. Wildcards only add to statements that already exist in the configuration.
+4. `show configuration interfaces xe-0/0/0 | display inheritance`.
+5. Group A's, because the first group listed takes precedence.
+
+</details>
+
+Next is **Day 4: `apply-path` and config hygiene** (`rename`, `copy`, `insert`), the last new topic before this week's quiz.
