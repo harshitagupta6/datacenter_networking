@@ -1,0 +1,162 @@
+Day 4 is the last new topic of week 2. It's in two parts: **`apply-path`**, which builds lists automatically from your own config, and **editing tools** that keep a growing config tidy.
+
+---
+
+# Day 4: `apply-path` and configuration hygiene
+
+## Part A: `apply-path`
+
+### 1. The problem it solves
+
+Many features need a list of IP addresses, such as "allow SSH only from these hosts" or "these are my BGP neighbours". You could type them into a **prefix list** by hand:
+
+```
+set policy-options prefix-list MY-ADDRS 10.1.1.0/31
+set policy-options prefix-list MY-ADDRS 10.1.1.2/31
+```
+
+But when you add a new interface, you must remember to update the list too. Forget once, and you get a security hole or a broken session.
+
+### 2. How `apply-path` works
+
+`apply-path` tells Junos to **fill the prefix list from addresses already in your configuration**:
+
+```
+set policy-options prefix-list LOCAL-ADDRS apply-path "interfaces <*> unit <*> family inet address <*>"
+```
+
+Read the path like a config path, where `<*>` means "any value here":
+- **interfaces `<*>`:** every interface
+- **unit `<*>`:** every unit
+- **family inet address `<*>`:** every IPv4 address
+
+So LOCAL-ADDRS automatically contains every IPv4 address configured on the switch, and updates itself whenever you add or remove one.
+
+### 3. Seeing what it matched
+
+Like groups, the generated entries are hidden in a normal `show`:
+```
+show configuration policy-options prefix-list LOCAL-ADDRS | display inheritance
+```
+
+### 4. Common uses
+
+| Prefix list | `apply-path` | Used for |
+| --- | --- | --- |
+| Local addresses | `"interfaces <*> unit <*> family inet address <*>"` | Protecting the Routing Engine |
+| NTP servers | `"system ntp server <*>"` | Allowing NTP replies through a filter |
+| BGP neighbours | `"protocols bgp group <*> neighbor <*>"` | Allowing only known BGP peers (week 8) |
+| Syslog hosts | `"system syslog host <*>"` | Allowing syslog traffic |
+
+These prefix lists are usually referenced in a **firewall filter on `lo0`** that protects the RE from unwanted exception traffic (Day 1). You'll build that filter properly later. Today you only build the lists, which is safe and can't lock you out.
+
+## Part B: Configuration hygiene tools
+
+| Command | Example | Does |
+| --- | --- | --- |
+| `copy` | `copy interfaces xe-0/0/1 to xe-0/0/3` | Duplicates a whole block; then you edit the differences |
+| `rename` | `rename interfaces interface-range FABRIC to interface-range FABRIC-LINKS` | Renames a statement and keeps everything under it |
+| `replace pattern` | `replace pattern link1 with LINK-1` | Find-and-replace across the candidate from your current level. Run it at a lower level to limit its scope. |
+| `insert` | `insert firewall filter F term B before term A` | Reorders terms. **Order matters** in firewall filters and routing policies, which are evaluated top-down and stop at the first match. |
+| `annotate` | `annotate interfaces xe-0/0/0 "uplink to sw2"` | A `/* comment */` above a statement (Day 3, week 1) |
+| `wildcard delete` | `wildcard delete interfaces xe-0/0/[2-3]` | Deletes every matching statement at once, after asking for confirmation |
+
+As always, all of these change only the candidate. Check with `show | compare` before committing.
+
+---
+
+## Hands-on (SW1)
+
+**Lab 1: Build a prefix list automatically**
+```
+configure private
+set policy-options prefix-list LOCAL-ADDRS apply-path "interfaces <*> unit <*> family inet address <*>"
+commit comment "w2d4: local-addrs apply-path"
+show policy-options prefix-list LOCAL-ADDRS | display inheritance
+```
+You should see 10.0.0.1/32, 10.1.1.0/31, 10.1.1.2/31 and probably your `em0` address.
+
+**Lab 2: Watch it update itself.** Use `copy` to create a test interface on the spare port, then change its address before committing:
+```
+copy interfaces xe-0/0/1 to xe-0/0/3
+show interfaces xe-0/0/3
+delete interfaces xe-0/0/3 unit 0 family inet address 10.1.1.2/31
+set interfaces xe-0/0/3 unit 0 family inet address 10.9.9.0/31
+set interfaces xe-0/0/3 description "test port"
+show | compare
+commit comment "w2d4: copy test"
+show policy-options prefix-list LOCAL-ADDRS | display inheritance
+```
+10.9.9.0/31 has appeared in the list without you touching it.
+
+Try one deliberate mistake: run `copy` again to a fresh port and commit **without** changing the address. Junos rejects the duplicate address on commit, which shows why you always edit after `copy`. Clear it with `rollback 0`.
+
+**Lab 3: Rename**
+```
+rename interfaces interface-range FABRIC to interface-range FABRIC-LINKS
+show interfaces interface-range FABRIC-LINKS
+commit comment "w2d4: rename range"
+```
+
+**Lab 4: Find and replace**
+```
+show interfaces | match description
+replace pattern link1 with LINK-1
+replace pattern link2 with LINK-2
+show | compare
+commit comment "w2d4: description cleanup"
+```
+Only the descriptions change. To limit the scope, run `replace pattern` from inside a hierarchy level, such as `edit interfaces xe-0/0/0`.
+
+**Lab 5: Order matters (`insert`).** Build a firewall filter just to practise ordering; **don't apply it** to any interface.
+```
+set firewall family inet filter ORDER-TEST term ALLOW-SSH from protocol tcp
+set firewall family inet filter ORDER-TEST term ALLOW-SSH from destination-port ssh
+set firewall family inet filter ORDER-TEST term ALLOW-SSH then accept
+set firewall family inet filter ORDER-TEST term DENY-ALL then discard
+set firewall family inet filter ORDER-TEST term ALLOW-PING from protocol icmp
+set firewall family inet filter ORDER-TEST term ALLOW-PING then accept
+show firewall family inet filter ORDER-TEST
+```
+ALLOW-PING landed **after** DENY-ALL, so pings would be discarded before ever reaching it. Fix the order:
+```
+insert firewall family inet filter ORDER-TEST term ALLOW-PING before term DENY-ALL
+show firewall family inet filter ORDER-TEST
+```
+
+**Lab 6: Clean up**
+```
+delete firewall family inet filter ORDER-TEST
+wildcard delete interfaces xe-0/0/3
+```
+Answer `yes` to the prompt. Then:
+```
+show | compare
+commit comment "w2d4: cleanup"
+show policy-options prefix-list LOCAL-ADDRS | display inheritance
+```
+10.9.9.0/31 has disappeared from the list automatically. Keep LOCAL-ADDRS; you'll use it when you build the `lo0` protection filter.
+
+Repeat Lab 1 on SW2, save rescue configs on both, and push to Git.
+
+---
+
+## Self-check
+
+1. You add a new interface with an IP address. What must you do to add it to a prefix list built with `apply-path`?
+2. Why don't the `apply-path` entries appear in a normal `show policy-options`?
+3. After `copy interfaces xe-0/0/1 to xe-0/0/3`, you commit straight away. What happens, and why?
+4. A filter has terms in this order: DENY-ALL, then ALLOW-SSH. What happens to SSH traffic? How do you fix it?
+5. You want to change "link1" only in `xe-0/0/0`'s description, not elsewhere. How do you scope `replace pattern`?
+
+<details><summary>Answers</summary>
+
+1. Nothing. The list updates itself from the configuration.
+2. They're generated, much like inherited group config. Use `| display inheritance` to see them.
+3. The commit fails: both interfaces would have the same IP address, which Junos rejects.
+4. It's discarded. Filters stop at the first matching term, and DENY-ALL matches everything. Fix with `insert ... term ALLOW-SSH before term DENY-ALL`.
+5. Run it from that level: `edit interfaces xe-0/0/0`, then `replace pattern link1 with LINK-1`.
+
+</details>
+
+That's all of week 2's content. Next is the **Day 5 quiz** covering weeks 1 and 2. Then comes the **Saturday challenge**: a timed rebuild of SW2's system config, interfaces and groups from the console. It doubles as the week 1 challenge if you haven't done that yet.
