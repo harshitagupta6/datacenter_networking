@@ -1,0 +1,177 @@
+Day 2 is **monitoring and troubleshooting interfaces**: learning to read what interfaces tell you, then using that to find faults. It uses the SW1↔SW2 links you addressed on Day 1.
+
+---
+
+# Day 2: Interface monitoring and troubleshooting
+
+## 1. The four levels of `show interfaces`
+
+From least to most detail:
+
+| Command | Shows | Use it for |
+| --- | --- | --- |
+| `show interfaces terse` | One line per interface: admin and link state, family, address | Quick health check of everything |
+| `show interfaces xe-0/0/0 brief` | Basic port settings | Checking config at a glance |
+| `show interfaces xe-0/0/0` (or `detail`) | MTU, speed, flags, traffic rates, unit details | Normal investigation |
+| `show interfaces xe-0/0/0 extensive` | Everything: all error counters, queue drops, link flap history | Hunting a real fault |
+
+`extensive` output is long, so filter it:
+```
+show interfaces xe-0/0/0 extensive | match "error|drop|MTU|flapped"
+```
+
+## 2. Reading the key fields
+
+| Field | What it tells you |
+| --- | --- |
+| `Physical link is Up/Down` | Signal on the port |
+| `Enabled` / `Administratively down` | Whether someone ran `disable` |
+| `Link-level type: Ethernet, MTU: 1514` | Physical MTU (including the 14-byte Ethernet header) |
+| `Last flapped` | When the link last changed state; a recent time means instability |
+| `Input rate` / `Output rate` | Current traffic in bits/s and packets/s |
+| `Input errors` / `Output errors` | Totals; non-zero means investigate |
+| `CRC/Align errors`, `Framing errors` | Corrupted frames, usually a bad cable or optic, or a speed/duplex issue |
+| `Drops` | Packets discarded, often from congestion or MTU |
+
+**Counters accumulate since boot.** Clear them before testing, so you only see new errors:
+```
+clear interfaces statistics xe-0/0/0
+```
+
+## 3. Live monitoring
+
+| Command | Does |
+| --- | --- |
+| `monitor interface xe-0/0/0` | Live counters and rates for one port. Press `n` for the next port, `q` to quit. |
+| `monitor interface traffic` | Live rates for all ports at once |
+| `monitor traffic interface xe-0/0/0` | Packet capture (tcpdump) |
+| `show log messages \| match SNMP_TRAP_LINK` | Link up/down events, with timestamps |
+
+**Watch out with `monitor traffic`:** it only captures traffic **to or from the Routing Engine** (exception traffic, from Day 1), such as pings to the switch, OSPF and BGP. Transit traffic stays in the PFE and won't appear.
+
+## 4. MTU: the classic data center fault
+
+Junos has two MTU values:
+
+| | Default | Set with |
+| --- | --- | --- |
+| **Physical MTU** (includes the 14-byte Ethernet header) | 1514 | `set interfaces xe-0/0/0 mtu 9216` |
+| **Family (IP) MTU** | Physical minus 14, so 1500 | Derived automatically |
+
+Data centers use **jumbo frames (9216)**. VXLAN in Phase 2 adds about 50 bytes of headers to every packet, so the fabric needs a larger MTU than the servers use.
+
+**An MTU mismatch is sneaky.** The link is up and small pings work, but large packets fail. Test it with `ping` options:
+```
+ping 10.1.1.1 size 8000 do-not-fragment count 3
+```
+- `size` is the ICMP payload; add 28 bytes (20 IP + 8 ICMP) to get the packet size.
+- `do-not-fragment` stops the sender from splitting the packet, so the test hits the true limit.
+
+The largest working `size` with IP MTU 1500 is 1472.
+
+## 5. `disable` vs `deactivate`
+
+| | `set interfaces xe-0/0/0 disable` | `deactivate interfaces xe-0/0/0` |
+| --- | --- | --- |
+| Port state | Administratively down; no light or signal | Config ignored; port falls back to defaults |
+| Config | Kept and still active | Kept but marked `inactive:` |
+| Use | Shut a port, as in a "shutdown" | Temporarily remove a config block |
+
+## 6. Useful ping options
+
+`ping 10.1.1.1 count 5 rapid size 1400 source 10.0.0.1 do-not-fragment`, where:
+- `rapid` gives quick `!!!!!` output.
+- `source` picks the sending address.
+
+**Isolating Layer 2 from Layer 3:** `show arp interface xe-0/0/0` checks whether the neighbour's MAC address was learned. Empty ARP plus a failed ping points at Layer 2 (the link) or an address mismatch.
+
+---
+
+## Hands-on: three planted faults
+
+**Setup:** clear counters on SW1 and confirm the baseline works:
+```
+clear interfaces statistics all
+ping 10.1.1.1 count 3
+ping 10.1.1.3 count 3
+```
+
+For each fault, **plant it on SW2**, then diagnose **from SW1 first** before looking at SW2's config, as you would in real troubleshooting. Undo each fault before starting the next.
+
+### Fault 1: The port that's down
+**Plant on SW2:**
+```
+set interfaces xe-0/0/1 disable
+commit
+```
+**Diagnose on SW1:**
+```
+show interfaces terse xe-0/0/1
+show interfaces xe-0/0/1 | match "Physical|flapped"
+show log messages | match SNMP_TRAP_LINK | last 5
+```
+**Expected:** link down on SW1, with a recent flap time and log entry. On SW2, `show interfaces terse` shows admin **down**, which tells you it was disabled rather than broken.
+
+**Undo:** `delete interfaces xe-0/0/1 disable`, then commit.
+
+### Fault 2: Link up, but ping fails
+**Plant on SW2:**
+```
+delete interfaces xe-0/0/0 unit 0 family inet address 10.1.1.1/31
+set interfaces xe-0/0/0 unit 0 family inet address 10.1.1.5/31
+commit
+```
+**Diagnose on SW1:**
+```
+show interfaces terse xe-0/0/0
+ping 10.1.1.1 count 3
+show arp interface xe-0/0/0
+```
+**Expected:** link up/up, but ping fails and ARP is empty. Then compare `show interfaces terse xe-0/0/0` on SW2. The addresses are in different subnets (10.1.1.0/31 vs 10.1.1.4/31), so neither side considers the other a neighbour.
+
+**Undo:** restore 10.1.1.1/31 and commit.
+
+### Fault 3: Small pings work, large ones fail
+**Plant:** set SW1 to jumbo and leave SW2 at a smaller MTU.
+```
+SW1:  set interfaces xe-0/0/0 mtu 9216
+SW2:  set interfaces xe-0/0/0 mtu 1600
+```
+Commit both.
+
+**Diagnose on SW1:**
+```
+ping 10.1.1.1 count 3
+ping 10.1.1.1 size 1500 do-not-fragment count 3
+ping 10.1.1.1 size 8000 do-not-fragment count 3
+show interfaces xe-0/0/0 | match MTU
+```
+**Expected:** the small pings work and the large ones fail. Compare `show interfaces xe-0/0/0 | match MTU` on both sides to find the mismatch.
+
+Virtual switches don't always enforce MTU exactly as hardware does. If the large ping unexpectedly works, the lesson still stands: always compare the MTU values on both ends.
+
+**Fix it properly:** set `mtu 9216` on **both** ends of both links, the data center standard you'll keep from now on. Commit, then confirm `ping 10.1.1.1 size 9000 do-not-fragment` works.
+
+**Finish:** run `show interfaces xe-0/0/0 extensive | match "error|drop"` on both switches to check for leftover errors, and push the configs to Git.
+
+---
+
+## Self-check
+
+1. A port shows admin **up**, link **down**. Name two likely causes.
+2. Why does `monitor traffic interface xe-0/0/0` not show H1-to-H2 traffic passing through SW1?
+3. The link is up, small pings work, and pings with `size 8000 do-not-fragment` fail. What's the first thing to compare?
+4. What's the difference between `disable` and `deactivate` on an interface?
+5. Why clear interface statistics before a test?
+
+<details><summary>Answers</summary>
+
+1. A cable or optic problem, or the far end is down or disabled. A speed mismatch is also possible on physical gear.
+2. It's transit traffic, handled entirely by the PFE. `monitor traffic` only sees traffic to or from the RE.
+3. The MTU on both ends: `show interfaces <port> | match MTU`.
+4. `disable` administratively shuts the port while keeping its config active. `deactivate` keeps the config in the file but makes Junos ignore it.
+5. Counters accumulate since boot, so old errors would hide whether the problem is happening now.
+
+</details>
+
+Next is **Day 3: `interface-range` and `groups`**, where you'll apply settings like that MTU 9216 once instead of port by port.
