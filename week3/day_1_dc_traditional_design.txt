@@ -1,1 +1,130 @@
+Week 3 shifts from CLI to **design**. It's mostly concepts and drawings, which matches JNCIA-DC's "Data Center Architectures" objective: multi-tier, spine-leaf, Layer 2 vs Layer 3 strategies, underlay vs overlay, and why EVPN-VXLAN exists. These ideas are the foundation for everything in Phases 2 and 3.
 
+## Week 3 overview
+
+| Day | Topic |
+| --- | --- |
+| **1** | Traffic patterns, and the traditional three-tier design and its limits |
+| 2 | Spine-leaf (Clos) fabrics: ECMP, scaling, oversubscription |
+| 3 | Layer 2 vs Layer 3 strategies: STP, MC-LAG, Virtual Chassis, L3 to the leaf |
+| 4 | Underlay vs overlay, and why VXLAN and EVPN exist |
+| 5 | Design exercise + quiz |
+
+---
+
+# Day 1: Traffic patterns and the three-tier design
+
+## 1. What a data center network must do
+
+A data center network connects thousands of servers and storage systems to **each other** and to the **outside world**. Compared with an office (campus) network, it needs:
+
+- **Bandwidth:** servers push 10, 25 or 100 Gbps each.
+- **Predictable, low latency:** applications are sensitive to delay and jitter.
+- **Resilience:** any single link or switch can fail with no outage.
+- **Scale:** you can grow from 10 racks to 100 without redesigning.
+- **Automation:** hundreds of identical switches must be configured consistently, which is where groups and, later, Apstra come in.
+
+## 2. North-south vs east-west traffic
+
+| | North-south | East-west |
+| --- | --- | --- |
+| Direction | In and out of the data center: users or the internet ↔ servers | Server ↔ server **inside** the data center |
+| Examples | A user loading a web page | Web server calling an app server, then a database; storage replication; VM migration; AI training jobs syncing GPUs |
+| Share today | Minority | **Majority** of traffic in modern data centers |
+
+Older networks were designed for north-south traffic. Modern applications are split into many services that constantly talk to each other, so **east-west traffic dominates**. That single shift drives most of this week's design changes.
+
+## 3. The traditional three-tier design
+
+Here is the classic design, with the problems marked:
+
+**The three tiers:**
+
+| Tier | Role |
+| --- | --- |
+| **Access** | Where servers plug in. Pure Layer 2: VLANs, no routing. |
+| **Aggregation** (distribution) | Collects the access switches. The **Layer 2/Layer 3 boundary**: the server default gateways live here, usually as a redundant pair using VRRP. Firewalls and load balancers often attach here. |
+| **Core** | Fast Layer 3 backbone connecting aggregation blocks and the exits to campus, WAN and internet. |
+
+VLANs usually stretch from the access layer up to the aggregation pair, so the whole lower half of the design is one large Layer 2 network.
+
+## 4. Why this design struggles today
+
+**1. Spanning Tree Protocol (STP) wastes half the links.** Every access switch connects to both aggregation switches for redundancy, but in Layer 2 that creates a **loop**. A frame could circle forever, multiplying until the network melts down in a **broadcast storm**. STP prevents this by **blocking** redundant links (the dashed lines in the diagram). The backup links sit idle until a failure, so you pay for bandwidth you can't use.
+
+**2. STP is slow and fragile.** When a link fails, STP takes from a second up to about 50 seconds (classic STP) to re-converge, and traffic drops meanwhile. A misconfiguration or faulty device can cause a loop that takes down the entire Layer 2 domain.
+
+**3. East-west traffic takes the long way.** Look at Server A to Server B. They're on different access switches, so traffic climbs to Agg 1 and comes back down. If they're in different VLANs, it must also be routed at the gateway. Path length varies with where the servers sit, so latency is unpredictable, and the aggregation pair carries almost all server-to-server traffic.
+
+**4. Large failure domains.** One Layer 2 domain spans many racks. A broadcast storm, MAC table overflow or STP bug affects all of them.
+
+**5. Limited scale.** Growth is capped by how many ports and how much capacity the aggregation pair has. Adding more means building a whole new "pod" and connecting pods through the core. That's another tier, more hops and more bottlenecks.
+
+**6. Compounding oversubscription** (next section).
+
+## 5. Oversubscription
+
+**Oversubscription** is the ratio of bandwidth *into* a switch from below to bandwidth *out* of it toward the next tier:
+
+> **Oversubscription = total downstream (server-facing) bandwidth ÷ total upstream (uplink) bandwidth**
+
+**Example:** an access switch with 48 × 10G server ports = 480 Gbps down, and 4 × 40G uplinks = 160 Gbps up. 480 ÷ 160 = **3:1**. If every server sent at full speed toward the uplinks, only a third would fit.
+
+Some oversubscription is normal, because servers rarely all transmit at once. The problem in three tiers is that **it multiplies at each tier**: 3:1 at access, plus another 4:1 at aggregation, can give an effective 12:1 for traffic crossing the core. And with STP blocking half the uplinks, the real figure is worse still.
+
+Typical modern targets are 3:1 or better for general workloads, and **1:1 (non-blocking)** for storage and AI/GPU fabrics.
+
+## 6. How the industry, and Juniper, patched it
+
+Before moving fully to IP fabrics, vendors tried to make Layer 2 less painful:
+
+| Approach | Idea | You'll meet it |
+| --- | --- | --- |
+| **Virtual Chassis** (Juniper) | Several switches act as one logical switch, with one config and no STP between members | Week 9 (JNCIA-DC lists it under high availability) |
+| **MC-LAG** | Two switches each terminate one side of a LAG, so a server or switch uses both links without STP blocking | Week 3, Day 3; JNCIP-DC |
+| **Virtual Chassis Fabric / QFabric** (Juniper) | Larger "one big switch" designs | Historical context |
+
+These reduce STP pain, but they keep large Layer 2 domains and proprietary scaling limits. The lasting answer is the **spine-leaf IP fabric**, which is tomorrow's topic.
+
+---
+
+## Exercise (about 30 minutes, paper or a drawing tool)
+
+1. **Draw** a three-tier design for 8 racks: 8 access switches, 2 aggregation and 2 core. Mark which links STP would block if Agg 1 is the root bridge.
+2. **Trace** the path of traffic between two servers on different access switches. How many switch hops does it take?
+3. **Calculate:** each access switch has 48 × 25G server ports and 2 × 100G uplinks, one blocked by STP.
+   - What's the oversubscription ratio on paper?
+   - What is it with STP blocking?
+4. **Your lab:** where would SW1 and SW2 sit if Lab A were a three-tier design? Which of today's problems would appear first if you added 10 more switches?
+
+Save your answers as `notes/week3-day1.md`.
+
+<details><summary>Answers to question 3</summary>
+
+Downstream: 48 × 25G = 1,200 Gbps.
+- **On paper:** 2 × 100G = 200 Gbps up, so 1,200 ÷ 200 = **6:1**.
+- **With STP:** only 1 × 100G forwards, so 1,200 ÷ 100 = **12:1**.
+
+</details>
+
+---
+
+## Self-check
+
+1. What's the difference between north-south and east-west traffic, and which dominates in modern data centers?
+2. Why does STP block links, and what does that cost you?
+3. In a three-tier design, where does the server default gateway usually sit?
+4. A switch has 32 × 100G server ports and 8 × 100G uplinks. What's its oversubscription ratio?
+5. Name two reasons the three-tier design handles east-west traffic poorly.
+
+<details><summary>Answers</summary>
+
+1. North-south flows in and out of the data center; east-west flows between servers inside it. East-west dominates.
+2. To prevent Layer 2 loops and broadcast storms. The cost: redundant links sit idle, so you pay for bandwidth you can't use, and failover is slow.
+3. At the aggregation layer, usually as a redundant pair running VRRP.
+4. 3,200 ÷ 800 = **4:1**.
+5. Any two of: traffic must climb to aggregation and back, so paths are long and variable; STP blocks half the uplinks; oversubscription compounds at each tier; the aggregation pair is a bottleneck.
+
+</details>
+
+**Day 2** introduces the **spine-leaf fabric**: how it solves each problem above, how ECMP uses every link, and how to size one. It's the design you'll build in Phase 2.
