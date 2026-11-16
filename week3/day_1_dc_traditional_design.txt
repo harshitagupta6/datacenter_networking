@@ -38,6 +38,7 @@ Older networks were designed for north-south traffic. Modern applications are sp
 
 Here is the classic design, with the problems marked:
 
+
 **The three tiers:**
 
 | Tier | Role |
@@ -127,4 +128,108 @@ Downstream: 48 × 25G = 1,200 Gbps.
 
 </details>
 
-**Day 2** introduces the **spine-leaf fabric**: how it solves each problem above, how ECMP uses every link, and how to size one. It's the design you'll build in Phase 2.
+==============================================================================================================================================================================
+
+## Question 1: Which links does STP block?
+
+**Setup:** 8 access switches (A1–A8), each dual-homed to Agg 1 and Agg 2. The two aggregation switches are linked to each other, and each connects to both core switches.
+
+**With Agg 1 as root bridge:**
+
+| Link | State | Why |
+| --- | --- | --- |
+| A1–A8 → Agg 1 (8 links) | **Forwarding** | The direct path to the root, so it becomes each access switch's root port |
+| A1–A8 → Agg 2 (8 links) | **Blocked** (8 links) | A second path to the root; keeping it open would create a loop |
+| Agg 1 ↔ Agg 2 | **Forwarding** | Agg 2's best path to the root |
+| Aggregation ↔ core (4 links) | **Not in STP** | These are Layer 3 routed links; STP only runs inside the Layer 2 domain |
+
+So **8 of 16 access uplinks (50%) carry no traffic** until a failure.
+
+**A detail that shows up in exams:** a blocked link is blocked at **one end**, not both. On each A↔Agg 2 link, the port on the **access switch** is the one blocked. Agg 2 is normally configured as the *secondary root*, with a better (lower) bridge priority than the access switches, so its port wins the "designated" role and the access switch's port becomes the alternate (blocked) port.
+
+## Question 2: How many hops between servers?
+
+Server A is on Access 1 and Server B on Access 5.
+
+| Case | Path | Switch hops |
+| --- | --- | --- |
+| Same VLAN | Access 1 → Agg 1 → Access 5 | **3** |
+| Different VLANs, gateway (VRRP master) on Agg 1 | Access 1 → Agg 1 (routed here) → Access 5 | **3**, including one routing step |
+| Different VLANs, but VRRP master on **Agg 2** while STP root is on Agg 1 | Access 1 → Agg 1 → Agg 2 (routed) → Agg 1 → Access 5 | **5** |
+| Both servers on the **same** access switch, same VLAN | Access 1 only | **1** |
+
+Two lessons:
+- **Hop count depends on where the servers sit,** which is why latency is unpredictable in three-tier designs. A spine-leaf fabric makes it the same for every pair (tomorrow).
+- **The 5-hop case is a classic real-world mistake.** If the STP root and the VRRP master are on different aggregation switches, traffic crosses the Agg 1 ↔ Agg 2 link unnecessarily. Best practice is to make the same switch both STP root and VRRP master for each VLAN.
+
+----
+
+That row needs three ideas you haven't covered yet: subnets per VLAN, default gateways and VRRP. Here they are from the beginning, using the same picture. This is background for week 3; VRRP itself isn't a JNCIA-DC exam topic.
+
+## 1. Different VLANs need a router between them
+
+Each VLAN is a separate network with its own IP subnet:
+
+| | VLAN | Subnet | Server IP |
+| --- | --- | --- | --- |
+| Server A | VLAN 10 | 192.168.10.0/24 | 192.168.10.5 |
+| Server B | VLAN 20 | 192.168.20.0/24 | 192.168.20.5 |
+
+Server A can't reach Server B directly, because they're in different subnets. It must send the packet to its **default gateway**, a router interface in its own subnet, for example 192.168.10.1. The gateway **routes** the packet into VLAN 20 and delivers it to Server B. That's the "routing step" in the table.
+
+In a three-tier design, the gateway lives on the **aggregation switches**.
+
+## 2. VRRP: two switches sharing one gateway
+
+You have two aggregation switches, so the gateway shouldn't depend on just one of them. **VRRP** (Virtual Router Redundancy Protocol) lets them share a gateway:
+
+- Both switches agree on one **virtual gateway IP**, 192.168.10.1, which is what the servers use.
+- At any moment, only **one** switch, the **master**, actually answers for that IP and routes the traffic.
+- The other is the **backup**. If the master fails, the backup takes over the same IP within about a second, and the servers never notice.
+
+## 3. STP decides which way frames travel
+
+Separately, STP (from Day 1) decides the **Layer 2 path**. With Agg 1 as root, every access switch's link to **Agg 2 is blocked**. So from any access switch, the only open road leads to **Agg 1**.
+
+## 4. Putting it together
+
+**Case 1: the master is on Agg 1** (STP root and VRRP master on the same switch)
+1. Server A sends to its gateway. The frame travels up the only open road: Access 1 → **Agg 1**.
+2. Agg 1 *is* the active gateway, so it routes the packet into VLAN 20.
+3. It sends it down the open road: Agg 1 → Access 5 → Server B.
+
+**3 switches: Access 1, Agg 1, Access 5.** ✅
+
+**Case 2: the master is on Agg 2** (STP root on Agg 1, VRRP master on Agg 2)
+1. Server A sends to its gateway. The frame still travels up the only open road: Access 1 → **Agg 1**.
+2. Agg 1 isn't the active gateway, so it just switches the frame along the Agg 1 ↔ Agg 2 link to **Agg 2**.
+3. Agg 2 routes the packet into VLAN 20.
+4. Agg 2's link to Access 5 is **blocked**, so it must send the packet back over the Agg 2 ↔ Agg 1 link to **Agg 1**.
+5. Agg 1 sends it down: Access 1... no, Access 5 → Server B.
+
+**5 switch visits: Access 1, Agg 1, Agg 2, Agg 1, Access 5.** ❌ The traffic crosses the Agg 1 ↔ Agg 2 link twice for no reason.
+
+**An analogy:** the post office (gateway) is in Town 2, but the only open road from your village (STP) goes to Town 1. Every letter goes to Town 1, across to Town 2 to be sorted, then back through Town 1 to reach the other village.
+
+## The takeaway
+
+When **one switch is both the STP root and the VRRP master**, the open roads lead straight to the active gateway, and traffic takes the short path. When they're split, traffic zig-zags between the aggregation switches, wasting bandwidth and adding delay.
+
+This is one more reason three-tier designs are fiddly: you have to keep two separate protocols aligned by hand. In the spine-leaf designs coming next (and EVPN-VXLAN later), every leaf acts as the gateway itself, so this problem disappears.
+
+## Question 4: Your lab as a three-tier design
+
+**Where SW1 and SW2 fit:** they're the **aggregation pair**. They're linked to each other, servers (H1, H2) hang off them, and in week 5 you'll configure the **IRB gateways** on them, which is exactly the aggregation role. Lab A has no separate access tier; the hosts connect straight to aggregation, and there's no core.
+
+**What breaks first if you add 10 more switches** as access switches, each dual-homed to SW1 and SW2:
+
+1. **STP blocks half the new uplinks.** 10 of the 20 new links sit idle immediately.
+2. **SW1 and SW2 become the bottleneck.** All east-west traffic between the new racks passes through them, limited by their ports and capacity.
+3. **The Layer 2 failure domain grows.** All 12 switches share one Layer 2 network, so one loop or broadcast storm affects every rack.
+
+The first problem appears the moment you cable them. The second shows up as traffic grows. The third only hurts when something goes wrong, but then it hurts everything at once.
+
+Tomorrow's spine-leaf design is built to remove all three.
+
+========================================================================================================================================================
+
