@@ -160,6 +160,18 @@ The two limits are set by port counts:
 - Leaves with 48 × 25G server ports and 8 × 100G uplinks → up to **8 spines**.
 - Capacity: 64 leaves × 48 servers = **3,072 server ports**.
 
+-----------------------==============================-------------------================================---------------------==============----------
+
+Now the real numbers
+Switch	Ports	What it limits
+Spine	64 ports	Each leaf uses 1 port per spine, so up to 64 leaves
+Leaf	8 × 100G uplinks	Each spine uses 1 uplink per leaf, so up to 8 spines
+Leaf	48 × 25G server ports	48 servers per leaf
+
+Total capacity: 64 leaves × 48 server ports = 3,072 servers. That’s the largest this fabric can grow with these switch models.
+
+===========------------------=============================---------------------------=====================================-----------------==============
+
 **Bigger than one fabric allows:** build several spine-leaf "pods" and connect them with a third layer of **super-spines**. That's a **5-stage** fabric (leaf → spine → super-spine → spine → leaf). The standard two-layer design is called **3-stage**, counting leaf, spine, leaf along the path. You'll design 5-stage fabrics in JNCIP-DC.
 
 ## 5. Oversubscription in spine-leaf
