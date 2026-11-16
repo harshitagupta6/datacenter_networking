@@ -1,1 +1,184 @@
+Day 2 is the **spine-leaf fabric**: the design that replaces three-tier, and the one you'll build in Phase 2. It also includes a short hands-on, since your Lab A can already demonstrate the key mechanism (ECMP).
 
+---
+
+# Day 2: Spine-leaf (Clos) fabrics
+
+## 1. The structure
+
+A spine-leaf fabric has just two layers of switches and three strict wiring rules:
+
+| Layer | Role |
+| --- | --- |
+| **Leaf** | Every server connects to a leaf, usually one or two per rack ("top of rack"). In modern designs, leaves are also the server gateways. |
+| **Spine** | Connects the leaves together. Nothing else plugs into spines: no servers, no firewalls. |
+
+**The rules:**
+1. **Every leaf connects to every spine.**
+2. **Leaves never connect to other leaves.**
+3. **Spines never connect to other spines.**
+
+The design is named after Charles Clos, who described it for telephone switching networks in 1953.
+
+Here's the same server-to-server journey as Day 1's three-tier diagram:
+
+## 2. How it fixes each three-tier problem
+
+| Three-tier problem (Day 1) | Spine-leaf answer |
+| --- | --- |
+| STP blocks half the links | Every leaf–spine link is a **routed Layer 3 link** (your /31s from week 2). There are no Layer 2 loops, so no STP and **no blocked links** |
+| Variable path length | Any server to any other: **leaf → spine → leaf, always 3 switches** (only 1 if both are on the same leaf). Latency is predictable |
+| Aggregation pair is a bottleneck | Traffic spreads across **all** spines at once |
+| Large failure domains | Layer 2 stays inside each leaf; a problem in one rack stays in that rack |
+| Scaling means redesign | Add a leaf for more ports, add a spine for more bandwidth (section 4) |
+| Oversubscription compounds | Only **one** oversubscription point: the leaf uplinks |
+
+----
+
+
+
+## 3. ECMP: using every path at once
+
+From Leaf 1, Server B (on Leaf 4) is reachable through Spine 1 **and** through Spine 2. Both paths have exactly the same cost: two hops. Routing protocols install **both** routes, and the switch spreads traffic across them. This is **ECMP** (Equal-Cost Multi-Path).
+
+**How traffic is split: per flow, not per packet.** The leaf calculates a **hash** of each packet's header fields, typically the "5-tuple": source IP, destination IP, protocol, source port, destination port. The hash picks the uplink.
+- All packets of one flow (one TCP connection) give the same hash, so they take the same path and **arrive in order**.
+- Different flows give different hashes, so they spread across all spines.
+
+A single huge flow (an "elephant flow") can still only use one path. This matters in storage and AI fabrics, and comes back in Phase 3.
+
+**Failure handling:** if Spine 1 dies, the leaves remove its routes and send everything through the remaining spines. With 2 spines you lose half the capacity; with 4 spines, only a quarter. **Nothing breaks.** Routing re-converges in well under a second when BFD is used (week 9), compared with STP's seconds.
+
+## 4. Scaling: "scale out", not "scale up"
+
+The two limits are set by port counts:
+
+| You want... | You add... | Limited by... |
+| --- | --- | --- |
+| More server ports (more racks) | **Leaves** | The number of ports on each spine (one per leaf) |
+| More bandwidth between racks | **Spines** | The number of uplink ports on each leaf (one per spine) |
+
+**Example:**
+- Spines with 64 ports → up to **64 leaves**.
+- Leaves with 48 × 25G server ports and 8 × 100G uplinks → up to **8 spines**.
+- Capacity: 64 leaves × 48 servers = **3,072 server ports**.
+
+**Bigger than one fabric allows:** build several spine-leaf "pods" and connect them with a third layer of **super-spines**. That's a **5-stage** fabric (leaf → spine → super-spine → spine → leaf). The standard two-layer design is called **3-stage**, counting leaf, spine, leaf along the path. You'll design 5-stage fabrics in JNCIP-DC.
+
+## 5. Oversubscription in spine-leaf
+
+There's only one place to calculate it, at each leaf:
+
+> **Leaf oversubscription = server-facing bandwidth ÷ uplink bandwidth to all spines**
+
+**Example:** a leaf with 48 × 25G = 1,200 Gbps of server ports.
+- With 4 spines × 100G uplinks = 400 Gbps, that's **3:1**.
+- With 8 spines × 100G = 800 Gbps, that's **1.5:1**.
+
+Adding spines directly improves the ratio, and all uplinks are active, so the number on paper is the real number. Day 1's STP-blocked links made the real figure worse than the paper one; here the two match.
+
+## 6. Special leaf roles
+
+Every external connection goes through a leaf, never a spine:
+
+| Role | Connects |
+| --- | --- |
+| **Server leaf** | Servers (most leaves) |
+| **Border leaf** | The outside world: WAN routers, internet, other data centers. All north-south traffic enters and leaves here |
+| **Service leaf** | Firewalls, load balancers |
+
+Spines stay simple, fast and identical, which makes them easy to add, replace and automate.
+
+**Servers usually connect to two leaves** for redundancy, using a LAG across both. In EVPN fabrics that's **ESI-LAG**, a Phase 2 topic.
+
+## 7. Routing the fabric (preview)
+
+The leaf–spine links need a routing protocol. Choices you'll meet:
+- **eBGP** is the most common in large data centers, and it's Juniper's recommended practice. Each switch gets its own AS number.
+- **OSPF** or **IS-IS** are simpler for smaller fabrics.
+
+You'll learn OSPF (week 7) and BGP (week 8) properly, then build an eBGP fabric in Phase 2.
+
+---
+
+## Hands-on: see ECMP in your lab (about 30 minutes)
+
+SW1 and SW2 have **two** links between them, so you can recreate "two equal paths" on a small scale. You already have a static route to SW2's loopback over link 1. Add the second path.
+
+**On SW1:**
+```
+configure private
+set routing-options static route 10.0.0.2/32 next-hop 10.1.1.3
+commit comment "w3d2: second next-hop"
+run show route 10.0.0.2
+```
+You'll see **two** next hops, `to 10.1.1.1 via xe-0/0/0` and `to 10.1.1.3 via xe-0/0/1`, but only one marked `>`. Now check what the PFE actually uses:
+```
+run show route forwarding-table destination 10.0.0.2
+```
+**Only one next hop.** By default, Junos installs just one of the equal paths in the forwarding table: the Day 1 routing table vs forwarding table distinction, live.
+
+**Enable ECMP.** Export a load-balancing policy to the forwarding table:
+```
+set policy-options policy-statement ECMP then load-balance per-packet
+set routing-options forwarding-table export ECMP
+commit comment "w3d2: enable ecmp"
+run show route forwarding-table destination 10.0.0.2
+```
+Now the next-hop type shows `ulst` (unilist) with **both** interfaces.
+
+Despite its name, `load-balance per-packet` does **per-flow** hashing on modern Juniper platforms. The keyword is a historical leftover, and a classic exam question.
+
+**Do the same on SW2**, with next hops 10.1.1.0 and 10.1.1.2 to 10.0.0.1/32 and the same policy.
+
+**Test failover:**
+```
+ping 10.0.0.2 source 10.0.0.1 rapid count 1000
+```
+While that runs, on SW2: `set interfaces xe-0/0/0 disable` and commit. Pings should continue through link 2, with at most a few lost. Then remove the `disable` and commit to restore it.
+
+Push both configs to Git.
+
+---
+
+## Exercise: size a fabric (about 20 minutes)
+
+A customer needs **1,000 servers**, each with one 25G port. Leaves have 48 × 25G server ports and 6 × 100G uplinks. Spines have 32 × 100G ports.
+
+1. How many leaves do you need?
+2. What's the maximum number of spines?
+3. With the maximum number of spines, what's the leaf oversubscription ratio?
+4. Does the design fit within one 3-stage fabric? Why or why not?
+
+<details><summary>Answers</summary>
+
+1. 1,000 ÷ 48 = 20.8, so **21 leaves**. Many designs round up to an even 22 for symmetry and growth.
+2. **6 spines**, one per leaf uplink.
+3. Down: 48 × 25G = 1,200 Gbps. Up: 6 × 100G = 600 Gbps. So **2:1**.
+4. **Yes.** Each spine needs one port per leaf: 21 leaves ≤ 32 spine ports. There's room for 11 more leaves before you'd need a 5-stage design.
+
+</details>
+
+---
+
+## Self-check
+
+1. State the three wiring rules of a spine-leaf fabric.
+2. Why is there no STP between leaves and spines?
+3. How many switches does traffic cross between servers on different leaves? On the same leaf?
+4. Why does ECMP hash per flow rather than send each packet down a different path?
+5. You need more bandwidth between racks but have enough server ports. Do you add leaves or spines?
+6. Where do firewalls and WAN routers connect in a spine-leaf fabric?
+
+<details><summary>Answers</summary>
+
+1. Every leaf connects to every spine; leaves never connect to leaves; spines never connect to spines.
+2. The links are routed Layer 3 links, so there are no Layer 2 loops to prevent.
+3. Three (leaf → spine → leaf). One, if both servers are on the same leaf.
+4. To keep each flow's packets on one path, so they arrive in order. Reordering hurts TCP performance.
+5. Spines.
+6. To leaves: border leaves for the WAN and outside world, service leaves for firewalls and load balancers. Never to spines.
+
+</details>
+
+**Day 3** covers **Layer 2 vs Layer 3 strategies**: what happens when applications still need Layer 2 between racks, plus MC-LAG, Virtual Chassis, and why "Layer 3 to the leaf" became the standard.
