@@ -33,9 +33,106 @@ Here's the same server-to-server journey as Day 1's three-tier diagram:
 | Scaling means redesign | Add a leaf for more ports, add a spine for more bandwidth (section 4) |
 | Oversubscription compounds | Only **one** oversubscription point: the leaf uplinks |
 
-----
+------------------------------=========================---------------------============================------------------============================-------------------
 
+Here's the full explanation, step by step. It comes down to one difference: **Ethernet frames have no way to die, and IP packets do.**
 
+## 1. What a Layer 2 switch does with a frame
+
+A switch makes decisions using **MAC addresses**, following simple rules:
+
+1. **Learn:** note the frame's source MAC and which port it came from.
+2. **Forward:** if the destination MAC is in the table, send the frame out that one port.
+3. **Flood:** if the destination is unknown, or it's a **broadcast** (like an ARP request "who has 192.168.10.1?"), send a copy out **every port except the one it arrived on**.
+
+Flooding is normal and necessary; it's how devices find each other. It becomes deadly when the switches are wired in a loop.
+
+## 2. Why a Layer 2 loop is catastrophic
+
+Take three switches wired in a triangle (A–B, B–C, C–A), and one server sending one ARP broadcast into switch A:
+
+1. A floods it to B and C.
+2. B floods its copy to C; C floods its copy to B.
+3. C sends B's copy back to A, and B sends C's copy back to A.
+4. A floods both again… and so on.
+
+Three things make this unstoppable:
+
+| Problem | Why |
+| --- | --- |
+| **Frames never expire** | The Ethernet header has **no TTL** (time-to-live) field. Nothing counts how many switches a frame has crossed, so a looping frame circles forever |
+| **Frames multiply** | Every flood creates more copies. Within seconds, links fill at 100% with copies of the same few broadcasts. This is a **broadcast storm** |
+| **Learning breaks** | The server's MAC keeps arriving from different ports, so switches keep moving it in their tables ("MAC flapping"), and normal traffic gets misdelivered |
+
+The CPUs on the switches overload and the whole Layer 2 domain goes down, often within seconds.
+
+**So Layer 2 needs STP.** Since frames can't protect themselves, STP finds every loop and **blocks** ports until only a loop-free tree remains. The price is the idle links from Day 1.
+
+## 3. Why Layer 3 doesn't need STP
+
+A router decides using **IP addresses** and a **routing table**, and its behaviour is fundamentally safer in three ways.
+
+**1. Packets have a TTL.** Every IP header carries a TTL, typically starting at 64. Every router **decrements it by 1**, and when it hits 0 the packet is **discarded**; the router may send an ICMP "time exceeded" back, which is how `traceroute` works. Even if a routing mistake created a loop, each packet dies after a limited number of hops. A loop is a bounded problem, never an explosion.
+
+**2. Routers don't flood.**
+- **Unknown destination:** a switch floods it everywhere; a router **drops** it ("no route to host").
+- **Broadcasts:** a router **never forwards** a broadcast to another link. Every routed link is its own separate broadcast domain. An ARP request on the SW1–SW2 link stays on that link.
+
+With no flooding, there's nothing to multiply.
+
+**3. Routing protocols compute loop-free paths.**
+- **OSPF** (week 7): every router learns the full topology map and calculates shortest paths with an algorithm (SPF) that by design produces no loops.
+- **BGP** (week 8): each route carries the list of AS numbers it has passed through (the AS path). A router rejects any route that already contains its own AS, preventing loops.
+
+Because routing protocols understand the topology instead of blindly flooding, they don't need to block redundant links. When two paths are equally good, they **use both**: ECMP, from Day 2.
+
+## 4. Side by side
+
+| | Layer 2 switching | Layer 3 routing |
+| --- | --- | --- |
+| Forwards based on | MAC address | IP address |
+| Unknown destination | **Flood** out all ports | **Drop** |
+| Broadcasts | Flooded across the whole Layer 2 domain | Stop at the router |
+| Loop protection in the packet | **None** (no TTL in Ethernet) | **TTL** decremented at each hop |
+| Loop prevention method | STP **blocks** redundant links | Routing protocols compute loop-free paths |
+| Redundant links | Idle (blocked) | **All used** (ECMP) |
+
+## 5. How spine-leaf links become Layer 3 only
+
+It's a **configuration choice** on each link. You already made it in week 2 Day 1.
+
+```
+set interfaces xe-0/0/0 unit 0 family inet address 10.1.1.0/31
+```
+
+- The port uses **`family inet`** (routing), **not** `family ethernet-switching` (switching). It isn't in any VLAN, so it isn't part of any Layer 2 domain.
+- Each link is its own tiny **/31 subnet** with exactly two devices: its own broadcast domain, so nothing can flood beyond it.
+- STP only operates on switching ports, so these links aren't part of any spanning tree at all.
+
+Configure **every** leaf–spine link this way, and the whole fabric between the leaves is routed. There's nowhere for a Layer 2 loop to form.
+
+**You've already proved this in your lab.** SW1 and SW2 have **two parallel links**. If those were Layer 2 switch ports in the same VLAN, that would be a loop: STP would block one, or without STP you'd get a broadcast storm. Because they're `/31` routed links, both are active and you load-balanced across them with ECMP yesterday. That's a miniature spine-leaf fabric.
+
+## 6. A packet's journey through the fabric
+
+Server A (on Leaf 1) sends to Server B (on Leaf 4):
+
+| Step | What happens |
+| --- | --- |
+| 1. Server A → Leaf 1 | An Ethernet frame addressed to **Leaf 1's MAC**, because Leaf 1 is Server A's gateway. This hop is Layer 2, inside the rack |
+| 2. Leaf 1 routes | Removes the Ethernet header, looks up B's IP in its routing table, picks a spine (ECMP hash), **decrements TTL**, and builds a **new** Ethernet frame addressed to Spine 1's MAC |
+| 3. Spine 1 routes | Same process: new frame to Leaf 4, TTL decremented again |
+| 4. Leaf 4 → Server B | New frame addressed to Server B's MAC, delivered on its local port |
+
+The Ethernet frame is **rebuilt at every hop**; it never travels further than one link. Only the IP packet makes the full journey, and its TTL protects it. Layer 2 exists only **inside each rack**, between a server and its leaf.
+
+## 7. The obvious follow-up question
+
+*"But what if an application needs two servers in different racks to be in the same VLAN?"* Many applications do: VM live migration, clustering, legacy apps.
+
+The answer isn't to bring Layer 2 back into the fabric. It's to **carry Layer 2 frames inside Layer 3 packets** across the routed fabric. That's **VXLAN** (the overlay), with **EVPN** as its control plane, coming in Day 4. The fabric itself stays pure Layer 3, loop-free and fully active; the Layer 2 connection rides on top of it like a tunnel.
+
+------------------------------=====================-----------------------=====================----------------------=================------------
 
 ## 3. ECMP: using every path at once
 
