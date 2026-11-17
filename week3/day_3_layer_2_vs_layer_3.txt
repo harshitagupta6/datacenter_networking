@@ -1,1 +1,209 @@
+Day 3 answers a practical question: **applications sometimes need Layer 2 between racks, so how do you provide it without the problems of Day 1?** There are four strategies, and each was an attempt to fix the one before. That progression is what the JNCIA-DC "Layer 2 and Layer 3 strategies" objective tests.
 
+---
+
+# Day 3: Layer 2 vs Layer 3 strategies
+
+## 1. Why applications still want Layer 2
+
+From Day 2's explanation, a pure Layer 3 fabric keeps each VLAN inside one rack. Some workloads struggle with that:
+
+| Need | Why it wants Layer 2 across racks |
+| --- | --- |
+| **VM live migration** (VMware vMotion) | A VM moving to a host in another rack must **keep its IP address**, so its subnet must exist in both racks |
+| **Clusters** | Some database and storage clusters use Layer 2 heartbeats, or a shared virtual IP that moves between members |
+| **Legacy applications** | Hard-coded IPs, or discovery by broadcast |
+| **Server redundancy** | A server dual-homed to two switches with one LAG needs both switches to act as one |
+
+So data center designers have always faced a tension: **Layer 2 gives flexibility; Layer 3 gives stability and scale.**
+
+---------------------------=============================------------------================================------------------=======================------------
+
+Here are both, from the ground up.
+
+---
+
+## 1. "Layer 2 gives flexibility; Layer 3 gives stability and scale"
+
+The difference comes from **how each layer identifies a device's location**.
+
+### Why Layer 2 is flexible
+
+In a Layer 2 network (one VLAN), devices find each other by **broadcasting**. A server sends an ARP request asking "who has 192.168.10.20?", every device in the VLAN hears it, and the owner replies. That gives Layer 2 two convenient properties:
+
+- **Location doesn't matter.** A server can plug into *any* port, on *any* switch in that VLAN, and keep the **same IP address**. No routing changes are needed; the switches learn its new location automatically from its MAC address.
+- **No configuration per move.** Move a VM from rack 1 to rack 4 (if the VLAN spans both), and it keeps working instantly.
+
+That's the flexibility: put anything anywhere, with no planning.
+
+### Why Layer 3 is stable and scalable
+
+In a Layer 3 design, **an IP subnet belongs to a place**. For example, 192.168.10.0/24 lives on Leaf 1 and 192.168.40.0/24 on Leaf 4. Routers forward based on that.
+
+- **Stability:** broadcasts stop at the router, packets have a TTL, routing protocols compute loop-free paths, and a problem in one rack stays in that rack. (All from my STP explanation last week.)
+- **Scale:** you can add hundreds of leaves and racks. Each is its own small, contained network, linked by routing, with all paths active.
+
+**The cost:** move a server from Leaf 1 to Leaf 4, and its IP no longer fits there. It must get a new IP address in Leaf 4's subnet. That's the loss of flexibility.
+
+### An analogy
+
+| | Layer 2 | Layer 3 |
+| --- | --- | --- |
+| Like | One huge open-plan office | A city of separate buildings with street addresses |
+| Finding someone | Shout across the room (broadcast) | Send mail to an address (routing) |
+| Moving desks | Sit anywhere and keep your name | Move buildings and you get a **new address** |
+| As it grows | Gets noisy and chaotic, and one fire alarm empties the whole floor | Each building is self-contained, so the city grows indefinitely |
+
+That's exactly the tension EVPN-VXLAN resolves (Day 4): a city of buildings (Layer 3), with tunnels letting chosen people keep their desk numbers when they move (Layer 2 where needed).
+
+---
+
+## 2. What is MC-LAG?
+
+Start with a normal LAG, then the problem it leaves, then MC-LAG.
+
+### Step 1: a normal LAG
+
+A **LAG** (Link Aggregation Group) bundles several physical links between **two devices** into **one logical link**. On Junos it's an `ae` interface, such as `ae0`. **LACP** is the protocol the two ends use to agree on the bundle.
+
+- **More bandwidth:** two 25G links make a 50G bundle.
+- **Link redundancy:** if one cable fails, traffic continues on the other.
+- **No STP blocking:** STP sees one logical link, not two, so there's no loop.
+
+**The catch:** both links must connect to the **same switch**. If that switch fails, the server loses both links and goes offline.
+
+### Step 2: MC-LAG fixes that
+
+**MC-LAG (Multi-Chassis LAG)** lets the two links of a LAG land on **two different switches**. The two switches cooperate so that, to the server, they look like **one switch**. The server just sees a normal LAG and uses both links actively.
+
+### How the two switches act as one
+
+| Piece | Job |
+| --- | --- |
+| **Same LACP identity** | Both switches send the same LACP system ID to the server, so the server believes both links go to one device and forms a normal LAG |
+| **ICL** (Inter-Chassis Link) | A link between Switch A and Switch B. It carries traffic between them when needed, for example if one switch loses its link to the server |
+| **ICCP** (Inter-Chassis Control Protocol) | Runs between the peers to keep them in sync: which MAC addresses and ARP entries each has learned, and the LACP state of each link |
+
+**What you get:**
+- Both server links are **active**, giving double bandwidth and no STP blocking.
+- If **either switch** fails, the server keeps running on the other link.
+- Each switch keeps its **own** software and config, unlike Virtual Chassis, so a software crash on one doesn't affect the other.
+
+**The limits:**
+- It works only for a **pair** of switches, never three or more.
+- Both peers need carefully **matched configuration**. A mismatch can cause traffic loss, or "split-brain", where each switch thinks it's in charge if the ICL fails.
+- Each vendor's MC-LAG is **proprietary**, so you can't pair a Juniper switch with another vendor's.
+
+That's why EVPN-VXLAN fabrics replace it with **ESI-LAG**, which provides the same result (a server dual-homed to two leaves, both links active) using a standard protocol, without the ICL, and across any leaves in the fabric. You'll configure ESI-LAG in Phase 2.
+
+Normal LAGs (`ae` interfaces with LACP) are part of your plan in **week 9**, where you'll bundle Lab A's two SW1–SW2 links into one.
+
+---------------=============================---------------------------===============================---------------------======================--------------
+
+
+## 2. The four strategies
+
+### Strategy A: Layer 2 everywhere, protected by STP
+The three-tier design from Day 1. VLANs span many racks, and STP blocks loops.
+- ✅ Simple concept; any VLAN anywhere.
+- ❌ Half the links idle, slow failover, huge failure domain, limited scale.
+
+### Strategy B: Layer 2 without STP blocking (MC-LAG or Virtual Chassis)
+Make **two or more switches look like one**, so a link to both isn't a loop and nothing needs blocking.
+
+**MC-LAG (Multi-Chassis Link Aggregation)**
+- Two separate switches each provide one side of a LAG. The server or downstream switch thinks it's connected to **one** device and uses **both** links actively.
+- The two peers stay in sync over an inter-chassis link (ICL), using a control protocol called **ICCP** to share MAC and state information.
+- Each peer keeps its **own** control plane and config, so a software problem on one doesn't take down the other.
+- ❌ Works only in **pairs**, needs careful matching config on both peers, and each vendor's MC-LAG is proprietary.
+
+**Virtual Chassis (Juniper)**
+- Several switches (up to 10 on many EX and QFX models) are cabled with dedicated Virtual Chassis ports and become **one logical switch**: one config, one management IP, one CLI.
+- Roles: one member is the **primary** Routing Engine, one is the **backup**, and the rest are **line cards**. If the primary fails, the backup takes over.
+- Interfaces are named by member, for example `xe-2/0/5` is port 5 on member 2.
+- ✅ Very simple to manage, and no STP between members.
+- ❌ **Shared fate:** one control plane means a software bug or upgrade can affect every member at once. It also has limited size.
+- **Virtual Chassis Fabric (VCF)** stretched this idea into a spine-leaf shape with more members, but it's now legacy.
+
+### Strategy C: Layer 3 to the leaf ("routed access")
+The Day 2 fabric: routed links everywhere, with each leaf the gateway for its own rack's VLANs.
+- ✅ No STP in the fabric, all links active (ECMP), small failure domains, massive scale, standards-based.
+- ❌ **No Layer 2 between racks.** VM migration across racks and stretched clusters don't work.
+
+### Strategy D: Layer 3 fabric + Layer 2 overlay (EVPN-VXLAN)
+Keep Strategy C's routed fabric, then **carry Layer 2 frames inside IP packets** across it wherever a VLAN needs to span racks.
+- ✅ Everything good about C, **plus** Layer 2 where you need it. Servers dual-home to two leaves with **ESI-LAG**, the standards-based replacement for MC-LAG.
+- ❌ More concepts to learn, which is what Phases 2 and 3 of your plan are for.
+- This is the **modern standard**, Juniper's recommended data center design, and what Apstra builds. Day 4 explains how it works.
+
+## 3. Side by side
+
+| | A: STP | B: MC-LAG / VC | C: L3 to leaf | D: EVPN-VXLAN |
+| --- | --- | --- | --- | --- |
+| Links used | ~50% | All | All (ECMP) | All (ECMP) |
+| Layer 2 across racks | Yes | Yes | **No** | **Yes** |
+| Failure domain | Very large | Large (VC: shared fate) | Small (one rack) | Small (fabric), with controlled L2 |
+| Scale | Low | Low to medium | Very high | Very high |
+| Standards-based | Yes | MC-LAG proprietary; VC Juniper-only | Yes | Yes |
+| Complexity | Low (until it breaks) | Medium | Low | Higher |
+| Where you'll see it | Older data centers | Small DCs, campus, migrations | Web-scale apps that don't need L2 | Modern enterprise and cloud DCs |
+
+## 4. Where these appear in your plan
+
+| Topic | When |
+| --- | --- |
+| STP basics | Week 4 (VLANs) |
+| LAG and Virtual Chassis | Week 9 (JNCIA-DC high availability) |
+| Strategy C in practice | Already in your lab: routed SW1↔SW2 links |
+| EVPN-VXLAN and ESI-LAG | Phase 2 (JNCIS-DC) and Phase 3 (JNCIP-DC) |
+| Migrating A or B to D | Phase 4 (project readiness) |
+
+Juniper's design guides also include a **collapsed fabric**: for small data centers, just **two switches** play the spine and gateway roles using EVPN, with no separate leaf layer. Strategy D can scale down as well as up.
+
+---
+
+## Exercise: choose a strategy (about 30 minutes)
+
+For each scenario, pick A, B, C or D and give one reason. There can be more than one defensible answer; the reasoning is what counts.
+
+1. A web company runs thousands of stateless containers. Applications find each other by DNS, and nothing needs to keep its IP when it moves.
+2. A small branch data center: 2 racks, 20 servers, one IT person, a tight budget. Some servers need dual-homing.
+3. An enterprise with 40 racks running VMware. VMs migrate between racks during maintenance, and they're planning to double in size.
+4. An existing three-tier data center has frequent STP outages. They need to remove STP **quickly**, without redesigning everything.
+5. A bank's two data centers must share some VLANs for a disaster-recovery cluster, and both sites are spine-leaf fabrics.
+
+<details><summary>Suggested answers</summary>
+
+1. **C.** Nothing needs Layer 2 across racks, so the simplest routed fabric wins. An overlay adds complexity with no benefit.
+2. **B (Virtual Chassis)** is very attractive: two switches managed as one, dual-homing without STP, minimal skills needed. A collapsed EVPN fabric (D) is the modern alternative if staff can support it.
+3. **D.** VM mobility needs Layer 2 across racks, and growth needs a scalable routed fabric. EVPN-VXLAN gives both.
+4. **B (MC-LAG)** at the aggregation layer removes STP blocking for dual-homed access switches with minimal redesign. Plan a migration to D afterwards.
+5. **D, with Data Center Interconnect (DCI):** EVPN-VXLAN can extend selected VLANs between sites. This is a JNCIP-DC topic (Phase 3).
+
+</details>
+
+Save your answers as `notes/week3-day3.md`.
+
+---
+
+## Self-check
+
+1. Why does VM live migration usually need Layer 2 between racks?
+2. How do MC-LAG and Virtual Chassis avoid STP blocking?
+3. What does "shared fate" mean for Virtual Chassis?
+4. What's the main limitation of a pure Layer 3 (routed access) design?
+5. How does EVPN-VXLAN combine the benefits of Layer 2 and Layer 3?
+6. On a Virtual Chassis, what does `xe-3/0/10` mean?
+
+<details><summary>Answers</summary>
+
+1. The VM keeps its IP address when it moves, so its subnet must exist on the destination rack as well.
+2. They make two or more switches appear as one device, so dual links to them form a LAG rather than a loop.
+3. One control plane runs every member, so a software bug, crash or upgrade can affect all members at once.
+4. VLANs can't span racks, so workloads needing Layer 2 adjacency (VM mobility, some clusters) don't work.
+5. The physical fabric stays routed (no STP, ECMP, small failure domains), while Layer 2 frames are carried over it in IP tunnels wherever a VLAN needs to span racks.
+6. Port 10 on PIC 0 of Virtual Chassis **member 3**.
+
+</details>
+
+**Day 4: underlay vs overlay**, and how VXLAN and EVPN make Strategy D work. It's the most important concept of week 3 and the base for all of Phase 2.
