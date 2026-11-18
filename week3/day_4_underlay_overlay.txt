@@ -18,6 +18,81 @@ An EVPN-VXLAN data center is really **two networks stacked on top of each other*
 
 **An analogy:** the underlay is the **road network** between cities: it only needs to get trucks from city to city. The overlay is the **shipping company's containers**: each container holds someone's goods, sealed, and the roads don't care what's inside.
 
+==================----------------------==========================----------------------------============================----------------------=========================
+| Its job | Get IP packets from any leaf to any other leaf: specifically, between their **loopback addresses** | Carry **server traffic** between leaves, including Layer 2 frames between racks |
+
+Those two lines describe **two different jobs**, done by two different sets of addresses. A concrete example makes it clear.
+
+## The setup
+
+| Device | Loopback (VTEP address) |
+| --- | --- |
+| Leaf 1 | 10.0.0.1 |
+| Leaf 4 | 10.0.0.4 |
+
+| Server | Connected to | IP | VLAN |
+| --- | --- | --- | --- |
+| Server A | Leaf 1 | 192.168.10.10 | 10 |
+| Server C | Leaf 4 | 192.168.10.30 | 10 |
+
+Notice there are **two kinds of addresses**: the switches' own loopbacks (10.0.0.x) and the servers' addresses (192.168.10.x).
+
+## The underlay's job: switch to switch
+
+> *"Get IP packets from any leaf to any other leaf: specifically, between their loopback addresses."*
+
+The underlay is the routing between the **switches themselves**. Its whole job is that every leaf can reach every other leaf's loopback:
+
+```
+Leaf 1 (10.0.0.1)  →  any spine  →  Leaf 4 (10.0.0.4)
+```
+
+The test is simply:
+```
+ping 10.0.0.4 source 10.0.0.1
+```
+If that works from every leaf to every other leaf, the underlay has done its job.
+
+Look at a **spine's routing table**: it contains only switch addresses, the leaf loopbacks and the /31 links. **There are no 192.168.10.x server addresses in it at all.** The underlay has no idea servers exist.
+
+## The overlay's job: server to server
+
+> *"Carry server traffic between leaves, including Layer 2 frames between racks."*
+
+Server A wants to talk to Server C. They're in the **same VLAN** but on **different racks**. The underlay can't help directly: it doesn't know where 192.168.10.30 is.
+
+So the overlay does this:
+1. Leaf 1 knows from EVPN that **Server C is behind Leaf 4 (10.0.0.4)**.
+2. Leaf 1 takes Server A's frame and **wraps it** in a VXLAN packet addressed **from 10.0.0.1 to 10.0.0.4**.
+3. That's a loopback-to-loopback packet, **exactly what the underlay knows how to deliver**. The spines route it to Leaf 4.
+4. Leaf 4 unwraps it and hands the original frame to Server C.
+
+The overlay **uses** the underlay. It converts "server to server" into "leaf to leaf", which the underlay can handle.
+
+## The analogy
+
+Think of a courier company:
+
+| | Courier company | Fabric |
+| --- | --- | --- |
+| **Underlay** | Trucks and roads between the company's **warehouses** | Routing between leaf **loopbacks** |
+| **Overlay** | Customers' parcels, packed into a box labelled "Warehouse 1 → Warehouse 4" | Server frames, wrapped in VXLAN addressed "Leaf 1 → Leaf 4" |
+| Who reads what | Truck drivers read only the warehouse label, never the customer's address inside | Spines read only the outer loopback addresses, never the server's addresses inside |
+
+## Why split it into two layers?
+
+Each layer can change without touching the other:
+- **Add a spine or a link?** That changes only the underlay; the overlay keeps working, with more paths available.
+- **Add a new VLAN or move a VM?** That changes only the overlay; the spines and underlay routing don't change at all.
+
+That separation is what makes large fabrics manageable.
+
+## In your lab
+
+When you run `ping 10.0.0.2 source 10.0.0.1` on SW1, you're testing exactly the **underlay's** job: loopback to loopback across routed links. In Phase 2, H1 and H2 will become the "servers", and you'll build the overlay on top of this.
+
+=================----------------------===========================----------------------------============================---------------------==========================
+
 ## 2. VXLAN: carrying Layer 2 inside Layer 3
 
 **VXLAN (Virtual Extensible LAN)** takes a server's original Ethernet frame, **wraps it in new headers**, and sends it across the routed fabric as an ordinary IP packet:
