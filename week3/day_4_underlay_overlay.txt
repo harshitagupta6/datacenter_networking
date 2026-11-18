@@ -1,1 +1,139 @@
+Day 4 is the most important concept of week 3: how **Strategy D** works. A routed fabric carries Layer 2 traffic between racks using two layers, the **underlay** and the **overlay**, built from **VXLAN** and **EVPN**. JNCIA-DC expects you to understand the purpose and basic operation. Phase 2 covers the details and configuration.
 
+---
+
+# Day 4: Underlay, overlay, VXLAN and EVPN
+
+## 1. Two networks in one
+
+An EVPN-VXLAN data center is really **two networks stacked on top of each other**:
+
+| | Underlay | Overlay |
+| --- | --- | --- |
+| What it is | The physical spine-leaf fabric | Virtual networks (VLANs and tenant networks) built **on top of** the underlay |
+| Its job | Get IP packets from any leaf to any other leaf: specifically, between their **loopback addresses** | Carry **server traffic** between leaves, including Layer 2 frames between racks |
+| Knows about | Leaf and spine loopbacks and /31 links only | VLANs, server MAC and IP addresses, tenants |
+| Protocols | eBGP, or OSPF/IS-IS; ECMP | VXLAN (to carry traffic) + EVPN (to share information) |
+| You've built | ✅ Part of it already: SW1↔SW2 /31 links, loopbacks, ECMP | Phase 2 |
+
+**An analogy:** the underlay is the **road network** between cities: it only needs to get trucks from city to city. The overlay is the **shipping company's containers**: each container holds someone's goods, sealed, and the roads don't care what's inside.
+
+## 2. VXLAN: carrying Layer 2 inside Layer 3
+
+**VXLAN (Virtual Extensible LAN)** takes a server's original Ethernet frame, **wraps it in new headers**, and sends it across the routed fabric as an ordinary IP packet:
+
+### The key terms
+
+| Term | Meaning |
+| --- | --- |
+| **VTEP** (VXLAN Tunnel Endpoint) | The device that wraps and unwraps VXLAN, normally **each leaf**. A VTEP is identified by its **loopback address**, which is why your `lo0` addresses matter so much |
+| **VNI** (VXLAN Network Identifier) | A 24-bit number naming each virtual network, like a VLAN ID but global across the fabric. Each leaf maps its local VLAN to a VNI, for example VLAN 10 ↔ VNI 10010 |
+| **Outer IP header** | Source = sending leaf's loopback, destination = receiving leaf's loopback. The underlay routes on **this** |
+| **UDP port 4789** | The standard VXLAN port |
+
+### Why VNIs instead of VLANs
+VLAN IDs are 12 bits, so only **4,094** VLANs exist. VNIs are 24 bits, so about **16 million** virtual networks exist, enough for cloud providers with thousands of customers.
+
+### A packet's journey (same VLAN, different racks)
+Server A (VLAN 10, Leaf 1) sends to Server C (VLAN 10, Leaf 4):
+
+1. **Server A → Leaf 1:** a normal Ethernet frame to Server C's MAC. Server A has no idea VXLAN exists.
+2. **Leaf 1 encapsulates:** it knows Server C's MAC is behind Leaf 4's VTEP (section 3 explains how). It wraps the frame: VNI 10010, outer IP from Leaf 1's loopback to Leaf 4's loopback.
+3. **Spines route it:** to them it's just an IP packet between two loopbacks, so they forward it with normal routing and ECMP. **Spines don't need to know VXLAN exists.**
+4. **Leaf 4 decapsulates:** it strips the outer headers, sees VNI 10010 = local VLAN 10, and delivers the original frame to Server C.
+
+Server A and Server C behave as if they're on the same switch. That's **Layer 2 across racks, over a Layer 3 fabric**.
+
+### Two details that link back to your labs
+- **MTU:** encapsulation adds about **50 bytes**. A server sending a full 1,500-byte packet becomes about 1,550 bytes on the fabric, so fabric links need a bigger MTU. That's why you set **MTU 9216** in week 2.
+- **ECMP:** the leaf sets the outer **UDP source port** from a hash of the inner packet. Different server flows get different outer headers, so the spines' ECMP hashing (Day 2) still spreads them across all paths.
+
+## 3. The missing piece: how does Leaf 1 know where Server C is?
+
+VXLAN only defines the wrapping. Leaf 1 still needs to know **which VTEP each MAC address sits behind**. There are two ways.
+
+**Option 1: Flood and learn (the old way).** Leaf 1 floods unknown frames to every other VTEP and learns from replies, exactly like a Layer 2 switch, but across the fabric. It works, but it brings back flooding, and ARP broadcasts travel everywhere. It's Layer 2's weaknesses again.
+
+**Option 2: EVPN (the modern way).** **EVPN (Ethernet VPN)** is a **control plane** that runs over **BGP**. Instead of learning by flooding, leaves **tell each other** what they have:
+
+> Leaf 4: *"I have MAC aa:bb:cc:00:00:03 with IP 192.168.10.30, in VNI 10010. Reach it at my VTEP, 10.0.0.4."*
+
+Every leaf receives this through BGP and installs it before any traffic flows. This is the idea "BGP carries MAC addresses", and it's the heart of JNCIS-DC and JNCIP-DC.
+
+### What EVPN gives you
+
+| Benefit | How |
+| --- | --- |
+| **No flood-and-learn** | MAC and IP locations are advertised in advance |
+| **ARP suppression** | A leaf already knows the IP-to-MAC mapping, so it answers ARP requests locally instead of flooding them across the fabric |
+| **Fast VM mobility** | When a VM moves, its new leaf advertises it, and every leaf updates quickly |
+| **Multihoming (ESI-LAG)** | A server dual-homed to two leaves; the standard replacement for MC-LAG (yesterday) |
+| **Routing between VNIs** | EVPN can also carry IP prefixes, so it routes between virtual networks and tenants |
+
+### EVPN route types (names only for now)
+EVPN messages come in numbered **route types**. JNCIA-DC only needs the purpose; JNCIS-DC and JNCIP-DC go deep:
+
+| Type | Carries |
+| --- | --- |
+| **Type 2** | MAC and IP advertisements ("this host lives behind me"): the most common |
+| **Type 3** | "I'm a VTEP in this VNI," for handling broadcast, unknown and multicast (BUM) traffic |
+| **Type 1 and Type 4** | Multihoming (ESI-LAG) |
+| **Type 5** | IP prefixes, for routing between networks |
+
+## 4. Where's the gateway? (A preview)
+
+Servers still need a default gateway to reach other subnets. EVPN-VXLAN fabrics place it in one of two ways:
+
+| | CRB (Centrally Routed Bridging) | ERB (Edge-Routed Bridging) |
+| --- | --- | --- |
+| Gateway on | A few central devices (spines or dedicated leaves) | **Every leaf** |
+| Inter-subnet traffic | Travels to the central gateway and back | Routed right at the first leaf |
+| Juniper's recommendation today | Older designs | ✅ **ERB** |
+
+In ERB, every leaf hosts the **same gateway IP and MAC**: an **anycast gateway**. A VM that moves to another rack finds "its" gateway already there. That also solves Day 1's VRRP/STP mismatch problem completely. You'll configure ERB in Phase 2 and compare it with CRB in Phase 3.
+
+## 5. Summary: one picture of the whole stack
+
+| Layer | Job | Technology | Who participates |
+| --- | --- | --- | --- |
+| **Underlay** | Loopback-to-loopback IP reachability | eBGP or OSPF, ECMP, /31 links, MTU 9216 | Leaves and spines |
+| **Overlay data plane** | Carry server frames between leaves | VXLAN (VTEPs, VNIs) | Leaves only |
+| **Overlay control plane** | Tell leaves where every MAC and IP lives | EVPN over BGP | Leaves (spines often relay the BGP sessions) |
+
+## 6. What you've already built toward this
+
+| Overlay requirement | Your Lab A |
+| --- | --- |
+| Loopbacks as VTEP addresses | ✅ `lo0` 10.0.0.1 and 10.0.0.2 |
+| Loopback-to-loopback reachability | ✅ Static routes today; BGP in week 8 and Phase 2 |
+| ECMP across paths | ✅ Two links, load-balanced (Day 2) |
+| Jumbo MTU for encapsulation | ✅ MTU 9216 via the JUMBO group |
+| VLANs and IRBs (the overlay's ingredients) | Weeks 4–5 |
+
+You've effectively built a two-switch underlay already.
+
+---
+
+## Self-check
+
+1. What's the underlay's only job, and what does it **not** need to know about?
+2. What's a VTEP, and which address identifies it?
+3. Why do fabric links need a larger MTU when using VXLAN?
+4. Why don't spines need to understand VXLAN?
+5. What problem does EVPN solve that VXLAN alone doesn't?
+6. What's the difference between a VLAN ID and a VNI, in size and in scope?
+7. In ERB, where is the default gateway, and what's an anycast gateway?
+
+<details><summary>Answers</summary>
+
+1. Provide IP reachability between all leaves' loopbacks. It doesn't need to know about VLANs, server MAC/IP addresses or tenants.
+2. A VXLAN Tunnel Endpoint (usually a leaf) that encapsulates and decapsulates VXLAN. It's identified by its loopback address.
+3. VXLAN adds about 50 bytes of headers to every server frame, so full-size server packets would otherwise exceed a 1,500-byte fabric MTU.
+4. They only see the outer IP header (loopback to loopback) and route it like any packet.
+5. How leaves learn which VTEP each MAC/IP sits behind. EVPN advertises this through BGP instead of flood-and-learn, and adds ARP suppression, fast mobility and multihoming.
+6. VLAN IDs are 12 bits (4,094) and local to a switch or Layer 2 domain. VNIs are 24 bits (~16 million) and identify a virtual network across the whole fabric.
+7. On every leaf. An anycast gateway is the same gateway IP and MAC configured on all leaves, so hosts find their gateway locally wherever they are.
+
+</details>
+
+**Day 5** is the week 3 wrap-up: a design exercise (draw a complete EVPN-VXLAN fabric for a customer brief) and a quiz covering all of week 3.
